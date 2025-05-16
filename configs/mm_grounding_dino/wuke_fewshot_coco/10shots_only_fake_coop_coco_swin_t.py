@@ -1,0 +1,115 @@
+_base_ = 'grounding_dino_swin-t_pretrain_obj365.py'
+
+data_root = '/home/wuke_2024/datasets/coco_fewshots/'
+
+class_name = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light', 'fire hydrant',
+ 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase',
+ 'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 
+'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator',
+ 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush')
+num_classes = len(class_name)
+metainfo = dict(classes=class_name, palette=[(220, 20, 60)])
+
+model = dict(use_fake_coop=True,num_tokens=195,bbox_head=dict(num_classes=num_classes))
+
+
+train_pipeline = [
+    dict(type='LoadImageFromFile'),
+    dict(type='LoadAnnotations', with_bbox=True),
+    dict(type='RandomFlip', prob=0.5),
+    dict(
+        type='RandomChoice',
+        transforms=[
+            [
+                dict(
+                    type='RandomChoiceResize',
+                    scales=[(480, 1333), (512, 1333), (544, 1333), (576, 1333),
+                            (608, 1333), (640, 1333), (672, 1333), (704, 1333),
+                            (736, 1333), (768, 1333), (800, 1333)],
+                    keep_ratio=True)
+            ],
+            [
+                dict(
+                    type='RandomChoiceResize',
+                    # The radio of all image in train dataset < 7
+                    # follow the original implement
+                    scales=[(400, 4200), (500, 4200), (600, 4200)],
+                    keep_ratio=True),
+                dict(
+                    type='RandomCrop',
+                    crop_type='absolute_range',
+                    crop_size=(384, 600),
+                    allow_negative_crop=True),
+                dict(
+                    type='RandomChoiceResize',
+                    scales=[(480, 1333), (512, 1333), (544, 1333), (576, 1333),
+                            (608, 1333), (640, 1333), (672, 1333), (704, 1333),
+                            (736, 1333), (768, 1333), (800, 1333)],
+                    keep_ratio=True)
+            ]
+        ]),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
+                   'scale_factor', 'flip', 'flip_direction', 'text',
+                   'custom_entities'))
+]
+
+train_dataloader = dict(
+    batch_size=2,
+    num_workers=4,
+    dataset=dict(
+        _delete_=True,
+        type='CocoDataset',
+        data_root=data_root,
+        metainfo=metainfo,
+        return_classes=True,
+        pipeline=train_pipeline,
+        filter_cfg=dict(filter_empty_gt=False, min_size=32),
+        ann_file='cocosplit_fsod_train_seed_0_shots_10.json',
+        data_prefix=dict(img='cocosplit_fsod_train_seed_0_shots_10')))
+
+val_dataloader = dict(
+    dataset=dict(
+        metainfo=metainfo,
+        data_root=data_root,
+        ann_file='5kval.json',
+        data_prefix=dict(img='5kval')))
+
+test_dataloader = val_dataloader
+
+val_evaluator = dict(ann_file=data_root + '5kval.json')
+test_evaluator = val_evaluator
+
+max_epoch = 50
+
+default_hooks = dict(
+    checkpoint=dict(interval=1, max_keep_ckpts=1, save_best='coco/bbox_mAP'),
+    logger=dict(type='LoggerHook', interval=5))
+train_cfg = dict(max_epochs=max_epoch, val_interval=1)
+
+param_scheduler = [
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=max_epoch,
+        by_epoch=True,
+        milestones=[45],
+        gamma=0.1)
+]
+
+
+optim_wrapper = dict(
+    optimizer=dict(lr=0.0001),
+    paramwise_cfg=dict(
+        custom_keys={
+            'absolute_pos_embed': dict(decay_mult=0.),
+            'fake_coop':dict(lr_mult=100.0),
+            'backbone': dict(lr_mult=0.0),
+            'language_model': dict(lr_mult=0.0), #似乎其实已经冻结了
+            'encoder': dict(lr_mult=0.0),
+            'decoder': dict(lr_mult=0.0),
+            # 'language_model.coop.coop_prompt': dict(lr_mult=2000.0),
+        }))
+load_from = '/home/wuke_2024/ov202503/mmdetection/grounding_dino_swin-t_pretrain_obj365_goldg_v3det_20231218_095741-e316e297.pth'
+# load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det_20231204_095047-b448804b.pth'  # noqa
