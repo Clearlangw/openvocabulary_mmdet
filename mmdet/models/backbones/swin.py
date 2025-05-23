@@ -18,7 +18,28 @@ from mmengine.utils import to_2tuple
 
 from mmdet.registry import MODELS
 from ..layers import PatchEmbed, PatchMerging
+from .lora_layers import MergedLinear
 
+class AdapterFFN(FFN):
+  def __init__(self, *args, **kwargs):
+        # 调用父类MMCV_FFN的__init__方法
+        # *args 和 **kwargs 会透传所有原始FFN的参数
+        super().__init__(*args, **kwargs)
+        
+        # 存储传入的adapter模块实例
+        self.adapter = Adapter(embed_dims)
+
+    def forward(self, x, identity=None):
+        out = self.layers(x)
+        out = self.gamma2(out)
+        # if self.adapter is not None:
+        #     # 'out' 此刻是FFN核心MLP变换的输出，正是adapter_module2期望作用的对象
+        out = self.adapter(out) ## Adapte的forward
+        if not self.add_identity:
+            return self.dropout_layer(out)
+        if identity is None:
+            identity = x
+        return identity + self.dropout_layer(out)
 
 class WindowMSA(BaseModule):
     """Window based multi-head self-attention (W-MSA) module with relative
@@ -68,8 +89,12 @@ class WindowMSA(BaseModule):
         rel_position_index = rel_index_coords + rel_index_coords.T
         rel_position_index = rel_position_index.flip(1).contiguous()
         self.register_buffer('relative_position_index', rel_position_index)
+        if lora_mode:
+            self.qkv = MergedLinear(embed_dims, embed_dims * 3, r=64, enable_lora=[True, False, True],
+                                    bias=qkv_bias)
+        else:
+            self.qkv = nn.Linear(embed_dims, embed_dims * 3, bias=qkv_bias)
 
-        self.qkv = nn.Linear(embed_dims, embed_dims * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop_rate)
         self.proj = nn.Linear(embed_dims, embed_dims)
         self.proj_drop = nn.Dropout(proj_drop_rate)
@@ -147,6 +172,8 @@ class ShiftWindowMSA(BaseModule):
             Defaults: dict(type='DropPath', drop_prob=0.).
         init_cfg (dict, optional): The extra config for initialization.
             Default: None.
+        lora_mode (bool, optional): Whether to use lora. Default: False.
+        adapter_mode (bool, optional): Whether to use adapter. Default: False.
     """
 
     def __init__(self,
@@ -159,13 +186,17 @@ class ShiftWindowMSA(BaseModule):
                  attn_drop_rate=0,
                  proj_drop_rate=0,
                  dropout_layer=dict(type='DropPath', drop_prob=0.),
-                 init_cfg=None):
+                 init_cfg=None,
+                 lora_mode=False,
+                 adapter_mode=False):
         super().__init__(init_cfg)
 
         self.window_size = window_size
         self.shift_size = shift_size
         assert 0 <= self.shift_size < self.window_size
-
+        self.adapter_mode = adapter_mode
+        if self.adapter_mode:
+            self.adapter = Adapter(embed_dims)
         self.w_msa = WindowMSA(
             embed_dims=embed_dims,
             num_heads=num_heads,
@@ -174,7 +205,8 @@ class ShiftWindowMSA(BaseModule):
             qk_scale=qk_scale,
             attn_drop_rate=attn_drop_rate,
             proj_drop_rate=proj_drop_rate,
-            init_cfg=None)
+            init_cfg=None,
+            lora_mode=lora_mode)
 
         self.drop = build_dropout(dropout_layer)
 
@@ -250,7 +282,8 @@ class ShiftWindowMSA(BaseModule):
             x = x[:, :H, :W, :].contiguous()
 
         x = x.view(B, H * W, C)
-
+        if self.adapter_mode:
+            x = self.adapter(x)
         x = self.drop(x)
         return x
 
@@ -309,6 +342,10 @@ class SwinBlock(BaseModule):
             Default: False.
         init_cfg (dict | list | None, optional): The init config.
             Default: None.
+        requires_grad (bool): Whether to require gradients.
+            Default: False.
+        finetune_mode (str): The mode of finetuning.
+            Default: None.
     """
 
     def __init__(self,
@@ -325,13 +362,21 @@ class SwinBlock(BaseModule):
                  act_cfg=dict(type='GELU'),
                  norm_cfg=dict(type='LN'),
                  with_cp=False,
-                 init_cfg=None):
+                 init_cfg=None,
+                 requires_grad=False,
+                 finetune_mode=None,
+                 ):
 
         super(SwinBlock, self).__init__()
 
         self.init_cfg = init_cfg
         self.with_cp = with_cp
-
+        lora_mode = False
+        if finetune_mode == 'lora':
+            lora_mode = True
+        adpater_mode = False
+        if finetune_mode == 'adapter':
+            adpater_mode = True
         self.norm1 = build_norm_layer(norm_cfg, embed_dims)[1]
         self.attn = ShiftWindowMSA(
             embed_dims=embed_dims,
@@ -343,18 +388,66 @@ class SwinBlock(BaseModule):
             attn_drop_rate=attn_drop_rate,
             proj_drop_rate=drop_rate,
             dropout_layer=dict(type='DropPath', drop_prob=drop_path_rate),
-            init_cfg=None)
+            init_cfg=None,
+            lora_mode=lora_mode,
+            adpater_mode=adpater_mode)
 
         self.norm2 = build_norm_layer(norm_cfg, embed_dims)[1]
-        self.ffn = FFN(
-            embed_dims=embed_dims,
-            feedforward_channels=feedforward_channels,
-            num_fcs=2,
-            ffn_drop=drop_rate,
-            dropout_layer=dict(type='DropPath', drop_prob=drop_path_rate),
-            act_cfg=act_cfg,
-            add_identity=True,
-            init_cfg=None)
+        if adpater_mode:
+            self.ffn = AdapterFFN(
+                embed_dims=embed_dims,
+                feedforward_channels=feedforward_channels,
+                num_fcs=2,
+                ffn_drop=drop_rate,
+                dropout_layer=dict(type='DropPath', drop_prob=drop_path_rate),
+                act_cfg=act_cfg,
+                add_identity=True,
+                init_cfg=None)
+        else:
+            self.ffn = FFN(
+                embed_dims=embed_dims,
+                feedforward_channels=feedforward_channels,
+                num_fcs=2,
+                ffn_drop=drop_rate,
+                dropout_layer=dict(type='DropPath', drop_prob=drop_path_rate),
+                act_cfg=act_cfg,
+                add_identity=True,
+                init_cfg=None)
+        self.requires_grad = requires_grad
+        self.finetune_mode = finetune_mode 
+        # if not self.requires_grad:
+        #     for param in self.parameters():
+        #         param.requires_grad = False
+        if self.finetune_mode is None:
+            for name, param in self.named_parameters():
+                param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'mona':
+            self.mona_module1 = Mona(embed_dims, 8)
+            self.mona_module2 = Mona(embed_dims, 8) # Adapter_FFN(dim, 8)
+            for name, param in self.named_parameters():
+                if 'mona_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'adapter':
+            for name, param in self.named_parameters():
+                if 'adapter' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'adapter_former':
+            self.adapter_former_module1 = AdapterFormer(embed_dims)
+            for name, param in self.named_parameters():
+                if 'adapter_former_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'bitfit':
+            for name, param in self.named_parameters():
+                if 'bias' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'lora':
+            for name, param in self.named_parameters():
+                if 'my_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'norm_tuning':
+            for name, param in self.named_parameters():
+                if 'norm' not in name:
+                    param.requires_grad = self.requires_grad
 
     def forward(self, x, hw_shape):
 
@@ -364,11 +457,21 @@ class SwinBlock(BaseModule):
             x = self.attn(x, hw_shape)
 
             x = x + identity
-
+            if self.finetune_mode == 'mona':
+                x = self.mona_module1(x, hw_shape)
+            # elif self.finetune_mode == 'adapter':
+            #     x = self.adapter_module1(x) #mona原论文里面的adapter位置和这里不一致
             identity = x
+            if self.finetune_mode == 'adapter_former':
+                adapt_x = self.adapter_former_module1(x)
             x = self.norm2(x)
             x = self.ffn(x, identity=identity)
-
+            if self.finetune_mode == 'mona':
+                x = self.mona_module2(x, hw_shape)
+            # elif self.finetune_mode == 'adapter':
+            #     x = self.adapter_module2(x)
+            elif self.finetune_mode == 'adapter_former':
+                x = x+adapt_x
             return x
 
         if self.with_cp and x.requires_grad:
@@ -406,6 +509,10 @@ class SwinBlockSequence(BaseModule):
             Default: False.
         init_cfg (dict | list | None, optional): The init config.
             Default: None.
+        requires_grad (bool): Whether to require gradients.
+            Default: False.
+        finetune_mode (str): The mode of finetuning.
+            Default: None.
     """
 
     def __init__(self,
@@ -423,7 +530,9 @@ class SwinBlockSequence(BaseModule):
                  act_cfg=dict(type='GELU'),
                  norm_cfg=dict(type='LN'),
                  with_cp=False,
-                 init_cfg=None):
+                 init_cfg=None,
+                 requires_grad=False,
+                 finetune_mode=None):
         super().__init__(init_cfg=init_cfg)
 
         if isinstance(drop_path_rate, list):
@@ -448,7 +557,9 @@ class SwinBlockSequence(BaseModule):
                 act_cfg=act_cfg,
                 norm_cfg=norm_cfg,
                 with_cp=with_cp,
-                init_cfg=None)
+                init_cfg=None,
+                requires_grad=requires_grad,
+                finetune_mode=finetune_mode)
             self.blocks.append(block)
 
         self.downsample = downsample
@@ -463,6 +574,104 @@ class SwinBlockSequence(BaseModule):
         else:
             return x, hw_shape, x, hw_shape
 
+class Adapter(BaseModule):
+    def __init__(self,
+                 in_dim):
+        super().__init__()
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+
+        self.dropout = nn.Dropout(p=0.1)
+
+    def forward(self, x):
+        project1 = self.project1(x)
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+        return x+project2
+
+class AdapterFormer(BaseModule):
+    def __init__(self,
+                 in_dim):
+        super().__init__()
+
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+        self.scale = 0.1
+        self.dropout = nn.Dropout(p=0.1)
+
+
+    def forward(self, x):
+        project1 = self.project1(x)
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+        project2 = project2*self.scale
+
+        return project2
+
+
+class MonaOp(nn.Module):
+    def __init__(self, in_features):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_features, in_features, kernel_size=3, padding=3 // 2, groups=in_features)
+        self.conv2 = nn.Conv2d(in_features, in_features, kernel_size=5, padding=5 // 2, groups=in_features)
+        self.conv3 = nn.Conv2d(in_features, in_features, kernel_size=7, padding=7 // 2, groups=in_features)
+
+        self.projector = nn.Conv2d(in_features, in_features, kernel_size=1, )
+
+    def forward(self, x):
+        identity = x
+        conv1_x = self.conv1(x)
+        conv2_x = self.conv2(x)
+        conv3_x = self.conv3(x)
+
+        x = (conv1_x + conv2_x + conv3_x) / 3.0 + identity
+
+        identity = x
+
+        x = self.projector(x)
+
+        return identity + x
+
+class Mona(BaseModule):
+    def __init__(self,
+                 in_dim,
+                 factor=4):
+        super().__init__()
+
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+
+        self.dropout = nn.Dropout(p=0.1)
+
+        self.adapter_conv = MonaOp(64)
+
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+
+    def forward(self, x, hw_shapes=None):
+        identity = x
+
+        x = self.norm(x) * self.gamma + x * self.gammax
+
+        project1 = self.project1(x)
+
+        b, n, c = project1.shape
+        h, w = hw_shapes
+        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        project1 = self.adapter_conv(project1)
+        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
+
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+
+        return identity + project2
 
 @MODELS.register_module()
 class SwinTransformer(BaseModule):
@@ -520,6 +729,10 @@ class SwinTransformer(BaseModule):
             Default: -1 (-1 means not freezing any parameters).
         init_cfg (dict, optional): The Config for initialization.
             Defaults to None.
+        requires_grad (bool): Whether to require gradients.
+            Default: False.
+        finetune_mode (str): The mode of finetuning.
+            Default: None.
     """
 
     def __init__(self,
@@ -546,7 +759,10 @@ class SwinTransformer(BaseModule):
                  pretrained=None,
                  convert_weights=False,
                  frozen_stages=-1,
-                 init_cfg=None):
+                 init_cfg=None,
+                 requires_grad=False,
+                 finetune_mode=None,
+                 ):
         self.convert_weights = convert_weights
         self.frozen_stages = frozen_stages
         if isinstance(pretrain_img_size, int):
@@ -629,7 +845,9 @@ class SwinTransformer(BaseModule):
                 act_cfg=act_cfg,
                 norm_cfg=norm_cfg,
                 with_cp=with_cp,
-                init_cfg=None)
+                init_cfg=None,
+                requires_grad=requires_grad,
+                finetune_mode=finetune_mode)
             self.stages.append(stage)
             if downsample:
                 in_channels = downsample.out_channels
@@ -640,6 +858,38 @@ class SwinTransformer(BaseModule):
             layer = build_norm_layer(norm_cfg, self.num_features[i])[1]
             layer_name = f'norm{i}'
             self.add_module(layer_name, layer)
+        if finetune_mode is None:
+            for name, param in self.named_parameters():
+                param.requires_grad = requires_grad
+        elif finetune_mode == 'mona':
+            for name, param in self.named_parameters():
+                if 'mona_module' not in name:
+                    param.requires_grad = requires_grad
+        elif finetune_mode == 'adapter':
+            for name, param in self.named_parameters():
+                if 'adapter' not in name:
+                    param.requires_grad = requires_grad
+        elif finetune_mode == 'adapter_former':
+            for name, param in self.named_parameters():
+                if 'adapter_former_module' not in name:
+                    param.requires_grad = requires_grad
+        elif finetune_mode == 'bitfit':
+            for name, param in self.named_parameters():
+                if 'bias' not in name:
+                    param.requires_grad = requires_grad
+        elif finetune_mode == 'lora':
+            for name, param in self.named_parameters():
+                if 'my_module' not in name:
+                    param.requires_grad = requires_grad
+            for name, m in self.named_modules():  # for lora
+                if isinstance(m, MergedLinear):
+                    for name, param in m.named_parameters():
+                        if "lora_" in name:
+                            param.requires_grad = True
+        elif finetune_mode == 'norm_tuning':
+            for name, param in self.named_parameters():
+                if 'norm' not in name:
+                    param.requires_grad = requires_grad
 
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""

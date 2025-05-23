@@ -75,6 +75,9 @@ class GroundingDINO(DINO):
                  use_maple=False,
                  coop_init=None,
                  coop_csc=False,
+                 background_supp=False, #背景抑制background_suppression，在predecoder那里修改
+                 background_supp_mode = 1,
+                 use_mona = False, #mona微调，使用mona对swintransformer进行微调
                  num_tokens=27,
                  *args,
                  use_autocast=False,
@@ -82,6 +85,7 @@ class GroundingDINO(DINO):
 
         self.language_model_cfg = language_model
         assert sum([use_coop, use_cocoop, use_maple]) <= 1, "Only one of 'use_coop', 'use_cocoop', or 'use_maple' can be True at a time."
+        #text端：
         self.use_coop=use_coop
         self.use_fake_coop = use_fake_coop
         self.use_cocoop=use_cocoop
@@ -90,12 +94,16 @@ class GroundingDINO(DINO):
         self.coop_csc =coop_csc #是否每一类均有不同的上下文参数，仅参考coop原论文
         #coop相关参数
         #TODO:实际to_enhance_text_prompts有前后缀的实现，可以merge
-
         self.coop_prompt_length=self.coop_n_ctx = 16 #可训练参数长度(左命名参考mrgdino，右名参考coop原论文)
         self.coop_prompt_channel=self.coop_ctx_dim  = 768
-
+        self.num_tokens = num_tokens #用于告诉coop微调词的数量
+        #vis端：swin微调参数
+        self.use_mona = use_mona
+        #VL交互：
+        self.background_supp = background_supp
+        self.background_supp_mode = background_supp_mode
         self.classnames = None #
-        self.num_tokens = num_tokens
+
         self._special_tokens = '. '
         self.use_autocast = use_autocast
         super().__init__(*args, **kwargs)
@@ -424,7 +432,7 @@ class GroundingDINO(DINO):
             text_attention_mask=~text_token_mask,
             position_ids=text_dict['position_ids'],
             text_self_attention_masks=text_dict['masks'])
-        # dict: The dictionary of encoder outputs, which includes the
+        #  dict: The dictionary of encoder outputs, which includes the
         #  `memory` of the encoder output.
 
         # print("memory shape is",memory.shape) #([2, 16320, 256])
@@ -462,12 +470,137 @@ class GroundingDINO(DINO):
         enc_outputs_coord_unact = self.bbox_head.reg_branches[
             self.decoder.num_layers](output_memory) + output_proposals
 
+        # 用于top-k选择的原始得分 (每个候选框在所有文本token/类别上的最大得分)
+        # original_scores 形状: (bs, num_all_proposals)
+        num_all_proposals = output_proposals.shape[1]
+        original_scores = enc_outputs_class.max(-1)[0]
+        alpha = 0.5*1e-2              # 用于 'score_modulation',最初为0.5
+        m_factor = 2               # 用于 'reranking',最初为2
+        beta = 0.5*1e-2               # 用于 'reranking',最初为0.5  
+        similarity_threshold = 150.0 # 用于 'gating' (需要根据点积的范围调整) 最开始为10.0
+        penalty_value = 1e5       # 用于 'gating'
+        # --- 背景抑制逻辑 ---
+        background_text_feat = torch.load('/home/wuke_2024/ov202503/mmdetection/ov_emb/background_wo_dot.pth',map_location=output_memory.device)
+        if background_text_feat.dim() == 3 and background_text_feat.shape[0] == 1:
+            background_text_feat = background_text_feat.squeeze(0)
+        # 扩展batch维度
+        background_text_feat = background_text_feat.unsqueeze(0).expand(bs, -1, -1)
+        background_text_feat=self.text_feat_map(background_text_feat)
+        if self.background_supp and background_text_feat is not None:
+            # 准备 background_text_feat
+            # 预期形状: (bs, num_bg_tokens, c_feat) 或 (1, num_bg_tokens, c_feat)
+            # 也可接受 (num_bg_tokens, c_feat), 将其视为 bs=1
+            processed_bg_feat = background_text_feat
+            if processed_bg_feat.ndim == 2: # (num_bg_tokens, c_feat)
+                # 假设 bs=1 或全局背景token集合, 扩展为 (1, num_bg_tokens, c_feat)
+                processed_bg_feat = processed_bg_feat.unsqueeze(0)
+            
+            if processed_bg_feat.ndim != 3:
+                raise ValueError(
+                    f"background_text_feat has unexpected ndim ({processed_bg_feat.ndim}) after potential unsqueeze. Expected 3 (e.g., bs/1, num_bg_tokens, c_feat)."
+                )
+            
+            # num_bg_tokens = processed_bg_feat.shape[1]
+            # 计算 proposal 特征与每个背景 token 特征的点积相似度
+            # output_memory_proposals_feat: (bs, num_all_proposals, c_feat)
+            # processed_bg_feat.transpose(-1, -2): (bs_bg, c_feat, num_bg_tokens) where bs_bg can be 1 or bs
+            # proposal_bg_token_sim_matrix 形状: (bs, num_all_proposals, num_bg_tokens)
+            # torch.matmul 会自动处理批次大小的广播 (如果 processed_bg_feat 的 bs_bg=1 且 output_memory_proposals_feat 的 bs > 1)
+            proposal_bg_token_sim_matrix = torch.matmul(output_memory, 
+                                                        processed_bg_feat.transpose(-1, -2))
+            
+            # 对每个 proposal，取其与所有背景 token 相似度中的最大值
+            # background_similarity 形状: (bs, num_all_proposals)
+            background_similarity = torch.max(proposal_bg_token_sim_matrix, dim=-1)[0]
+            # # 验证相似度(zero shot下示例)
+            # print(f'background_similarity is',background_similarity) #相似度 tensor([[151.4507, 151.4507, 151.4507,  ..., 180.0379, 173.8595, 160.4793]],
+            # print(f'original_scores is',original_scores) #最初分数 tensor([[-5.0210, -5.0210, -5.0210,  ..., -5.0174, -5.0957, -5.2854]],
+            # background_mask = background_similarity > similarity_threshold
+            # print(f'background_mask is',background_mask)
+            # # background_similarity min: 42.2682, max: 258.1486
+            # # original_scores min: -7.0973, max: -0.1072
+            # print(f'background_similarity min: {background_similarity.min().item():.4f}, max: {background_similarity.max().item():.4f}')
+            # print(f'original_scores min: {original_scores.min().item():.4f}, max: {original_scores.max().item():.4f}')
+            # print(f'background_mask True count: {background_mask.sum().item()}')
+            # print(f'background_mask False count: {(~background_mask).sum().item()}')
+            # import numpy as np
+            # # 假设 background_similarity, original_scores 都是 [bs, num_proposals] 的 tensor
+            # np.save('/home/wuke_2024/ov202503/mmdetection/zero_shot_background_similarity.npy', background_similarity.cpu().numpy())
+            # np.save('/home/wuke_2024/ov202503/mmdetection/zero_shot_original_scores.npy', original_scores.cpu().numpy())
+            # import sys
+            # sys.exit()
+            # # 验证相似度(full training下示例)
+            # print(f'background_similarity is',background_similarity) #相似度 tensor([[146.5329, 146.5329, 146.5329,  ..., 160.8054, 160.1912, 137.2802]],
+            # print(f'original_scores is',original_scores) #最初分数 tensor([[-4.5432, -4.5432, -4.5432,  ..., -5.1797, -5.1553, -4.9001]],
+            # background_mask = background_similarity > similarity_threshold
+            # print(f'background_mask is',background_mask)
+            # # 统计信息
+            # # background_similarity min: 44.5390, max: 275.4955
+            # # original_scores min: -7.1635, max: 1.3547
+            # print(f'background_similarity min: {background_similarity.min().item():.4f}, max: {background_similarity.max().item():.4f}')
+            # print(f'original_scores min: {original_scores.min().item():.4f}, max: {original_scores.max().item():.4f}')
+            # print(f'background_mask True count: {background_mask.sum().item()}')
+            # print(f'background_mask False count: {(~background_mask).sum().item()}')
+            # import numpy as np
+            # # 假设 background_similarity, original_scores 都是 [bs, num_proposals] 的 tensor
+            # np.save('/home/wuke_2024/ov202503/mmdetection/full_training_background_similarity.npy', background_similarity.cpu().numpy())
+            # np.save('/home/wuke_2024/ov202503/mmdetection/full_training_original_scores.npy', original_scores.cpu().numpy())
+            # import sys
+            # sys.exit()
+            if self.background_supp_mode == 'score_modulation':
+                # 方案1: 用背景相似度调整原始得分
+                modulated_scores = original_scores - alpha * background_similarity
+                topk_indices = torch.topk(modulated_scores, k=self.num_queries, dim=1)[1]
+                # print(f"使用score_modulation。原始最高分: {original_scores.max().item()}, 调整后最高分: {modulated_scores.max().item()}")
+
+            elif self.background_supp_mode == 'reranking':
+                # 方案2: 选择top-M, 然后使用背景相似度进行重排序
+                num_queries_k = self.num_queries
+                num_queries_m = min(num_queries_k * m_factor, num_all_proposals)
+
+                top_m_original_scores, top_m_indices = torch.topk(
+                    original_scores, k=num_queries_m, dim=1)
+                
+                top_m_output_memory_feat = torch.gather(
+                    output_memory, 1,
+                    top_m_indices.unsqueeze(-1).repeat(1, 1, c))
+
+                # 计算这M个候选框与背景token的最大相似度
+                # top_m_output_memory_feat: (bs, M, c_feat)
+                # proposal_m_bg_token_sim_matrix 形状: (bs, M, num_bg_tokens)
+                proposal_m_bg_token_sim_matrix = torch.matmul(top_m_output_memory_feat,
+                                                              processed_bg_feat.transpose(-1, -2))
+                background_similarity_m = torch.max(proposal_m_bg_token_sim_matrix, dim=-1)[0] # (bs, M)
+                
+                reranked_scores_m = top_m_original_scores - beta * background_similarity_m
+                _, final_topk_indices_in_m = torch.topk(
+                    reranked_scores_m, k=num_queries_k, dim=1)
+                topk_indices = torch.gather(top_m_indices, 1, final_topk_indices_in_m)
+                # print(f"使用reranking。M={num_queries_m}, K={num_queries_k}")
+
+            elif self.background_supp_mode == 'gating':
+                # 方案3: 惩罚背景相似度高于阈值的候选框
+                background_mask = background_similarity > similarity_threshold
+                penalized_scores = original_scores - background_mask.float() * penalty_value
+                topk_indices = torch.topk(penalized_scores, k=self.num_queries, dim=1)[1]
+                # print(f"使用gating。被掩码的大致数量: {background_mask.sum().item() / bs}")
+
+            else: 
+                topk_indices = torch.topk(original_scores, k=self.num_queries, dim=1)[1]
+        else:
+            # 没有背景抑制或未提供 background_text_feat
+            topk_indices = torch.topk(original_scores, k=self.num_queries, dim=1)[1]
+            # if self.background_supp and background_text_feat is None:
+            #    print("背景抑制已启用, 但 background_text_feat 为 None。跳过。")
+        # --- 背景抑制逻辑结束 ---
+
         # NOTE The DINO selects top-k proposals according to scores of
         # multi-class classification, while DeformDETR, where the input
         # is `enc_outputs_class[..., 0]` selects according to scores of
         # binary classification.
-        topk_indices = torch.topk(
-            enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
+
+        # topk_indices = torch.topk(
+        #     enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
 
         topk_score = torch.gather(
             enc_outputs_class, 1,
@@ -477,6 +610,7 @@ class GroundingDINO(DINO):
             topk_indices.unsqueeze(-1).repeat(1, 1, 4))
         topk_coords = topk_coords_unact.sigmoid()
         topk_coords_unact = topk_coords_unact.detach()
+
 
         query = self.query_embedding.weight[:, None, :]
         query = query.repeat(1, bs, 1).transpose(0, 1)

@@ -17,9 +17,17 @@ def get_bert_input_embedding(text: str,
     input_ids = inputs['input_ids']  # (1, seq_len)
     print(input_ids)
     # 只经过 embedding 层
+    # with torch.no_grad():
+    #     #emb = model.embeddings.word_embeddings(input_ids)
+    #     emb = model.embeddings(input_ids)  # (1, seq_len, channel)
+    dot_token_id = tokenizer.encode('.')[1]  # 获取点号的token id
+    print(dot_token_id)
+    mask = (input_ids != dot_token_id)  # 创建mask，True表示非点号位置
+    
     with torch.no_grad():
-        #emb = model.embeddings.word_embeddings(input_ids)
-        emb = model.embeddings(input_ids)  # (1, seq_len, channel)
+        emb = model.embeddings(input_ids)
+        # 使用mask过滤掉点号对应的embedding
+        emb = emb[mask.unsqueeze(-1).expand_as(emb)].view(1, -1, emb.size(-1))
     if remove_cls_seq:
         emb = emb[:,1:-1,:]
     return emb  # shape: (1, seq_len, channel)
@@ -52,15 +60,17 @@ def find_prompt_segments(pos_ids, prompt_length):
     return segments
 
 if __name__ == "__main__":
-    text = "An aerial photograph of a busy urban or park area, one of the objects is" #torch.Size([1, 16, 768])
-    text="XX XX XX XX XX"
+    # text = "An aerial photograph of a busy urban or park area, one of the objects is" #torch.Size([1, 16, 768])
+    # text="XX XX XX XX XX"
+    text = "building.road.sidewalk.wall.fence.dirt.stone.sand.river.hill.tree.grass.bush.sky.cloud.rain.shadow.night.background.texture"
     # text = "an aerial image of" #torch.Size([1, 4, 768])
     # text = "an aerial view image of" #torch.Size([1, 5, 768])
     emb_save_dir = "/home/wuke_2024/ov202503/mmdetection/ov_emb"
     emb = get_bert_input_embedding(text)
-    # filename = f"{text.replace(' ', '_')}.pth"
-    # #emb_path = os.path.join(emb_save_dir, filename)
-    # save_embedding(emb,emb_save_dir,filename)
+    filename = f"{text.replace(' ', '_')}.pth"
+    filename = "background_wo_dot.pth"
+    #emb_path = os.path.join(emb_save_dir, filename)
+    save_embedding(emb,emb_save_dir,filename)
 
     print(emb.shape)
     print(emb)

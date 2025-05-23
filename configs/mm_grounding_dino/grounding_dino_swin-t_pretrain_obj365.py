@@ -44,7 +44,10 @@ model = dict(
         with_cp=True,
         convert_weights=True,
         frozen_stages=-1,
-        init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
+        init_cfg=dict(type='Pretrained', checkpoint=pretrained),
+        requires_grad=False,
+        finetune_mode=None,
+        ),
     neck=dict(
         type='ChannelMapper',
         in_channels=[192, 384, 768],
