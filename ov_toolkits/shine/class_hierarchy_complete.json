@@ -1,0 +1,302 @@
+{
+    "pedestrian": {
+        "super-categories": [
+            "human",
+            "moving object",
+            "person",
+            "road user"
+        ],
+        "sub-categories": [
+            "child-in-stroller",
+            "child-pedestrian",
+            "construction-worker-crossing",
+            "crossing-guard",
+            "crosswalk-user",
+            "delivery-person",
+            "dog-walker",
+            "elderly-pedestrian",
+            "jogger",
+            "parent-with-stroller",
+            "pedestrian-using-phone",
+            "pedestrian-with-dog",
+            "pedestrian-with-shopping-bags",
+            "person-carrying-bags",
+            "person-on-crutches",
+            "person-using-wheelchair",
+            "person-walking-dog",
+            "person-with-cane",
+            "person-with-stroller",
+            "person-with-wheelchair",
+            "rollerblader",
+            "school-crossing-guard",
+            "schoolchild",
+            "shopper",
+            "skateboarder",
+            "street-performer",
+            "tourist"
+        ],
+        "synonyms": [
+            "foot traveler",
+            "passerby",
+            "walker"
+        ]
+    },
+    "people": {
+        "super-categories": [
+            "humans",
+            "living things",
+            "organisms",
+            "social entities",
+            "social groups"
+        ],
+        "sub-categories": [
+            "child",
+            "construction-worker",
+            "delivery-person",
+            "elderly",
+            "homeless-person",
+            "jogger",
+            "medical-staff",
+            "police-officer",
+            "policeman",
+            "school-student",
+            "security-guard",
+            "street-performer",
+            "street-vendor",
+            "student",
+            "tourist",
+            "vendor"
+        ],
+        "synonyms": [
+            "human",
+            "individual",
+            "person"
+        ]
+    },
+    "bicycle": {
+        "super-categories": [
+            "sports equipment",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "bmx bike",
+            "cargo bike",
+            "cruiser bike",
+            "electric bike",
+            "fixed-gear bike",
+            "folding bike",
+            "gravel bike",
+            "mountain bike",
+            "recumbent bike",
+            "road bike",
+            "touring bike"
+        ],
+        "synonyms": [
+            "bike",
+            "cycle",
+            "pushbike"
+        ]
+    },
+    "car": {
+        "super-categories": [
+            "machine",
+            "transport",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "cabriolet",
+            "compact car",
+            "convertible",
+            "coupe",
+            "crossover",
+            "fastback",
+            "hatchback",
+            "limousine",
+            "luxury car",
+            "microcar",
+            "roadster",
+            "sedan",
+            "sports car",
+            "station wagon"
+        ],
+        "synonyms": [
+            "auto",
+            "automobile",
+            "sedan"
+        ]
+    },
+    "van": {
+        "super-categories": [
+            "automobile",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "box van",
+            "camper van",
+            "cargo van",
+            "compact van",
+            "conversion van",
+            "crew van",
+            "high roof van",
+            "high-roof van",
+            "minivan",
+            "panel van",
+            "passenger van",
+            "refrigerated van",
+            "step van",
+            "wheelchair accessible van"
+        ],
+        "synonyms": [
+            "cargo van",
+            "minivan",
+            "panel van"
+        ]
+    },
+    "truck": {
+        "super-categories": [
+            "automobile",
+            "machine",
+            "transport",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "box truck",
+            "cement mixer truck",
+            "dump truck",
+            "fire truck",
+            "flatbed truck",
+            "garbage truck",
+            "logging truck",
+            "pickup truck",
+            "refrigerated truck",
+            "tanker truck",
+            "tow truck"
+        ],
+        "synonyms": [
+            "lorry",
+            "pickup",
+            "pickup truck"
+        ]
+    },
+    "tricycle": {
+        "super-categories": [
+            "cycle",
+            "toy",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "cargo tricycle",
+            "delivery tricycle",
+            "drift tricycle",
+            "electric tricycle",
+            "folding tricycle",
+            "hand tricycle",
+            "hand-powered tricycle",
+            "handcycle tricycle",
+            "ice cream tricycle",
+            "kids tricycle",
+            "recumbent tricycle",
+            "rickshaw tricycle",
+            "tandem tricycle"
+        ],
+        "synonyms": [
+            "pedal trike",
+            "three-wheeler",
+            "trike"
+        ]
+    },
+    "awning-tricycle": {
+        "super-categories": [
+            "bicycle",
+            "commercial-fixture",
+            "outdoor-equipment",
+            "shade-structure",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "advertising-awning-tricycle",
+            "cargo-awning-tricycle",
+            "child-awning-tricycle",
+            "delivery-awning-tricycle",
+            "electric-awning-tricycle",
+            "food-cart-awning-tricycle",
+            "ice-cream-awning-tricycle",
+            "mail-delivery-awning-tricycle",
+            "mobile-shop-awning-tricycle",
+            "passenger-awning-tricycle",
+            "pet-transport-awning-tricycle",
+            "recycling-awning-tricycle",
+            "school-awning-tricycle",
+            "school-transport-awning-tricycle",
+            "taxi-awning-tricycle",
+            "tourist-awning-tricycle"
+        ],
+        "synonyms": [
+            "cycle rickshaw",
+            "pedicab",
+            "rickshaw"
+        ]
+    },
+    "bus": {
+        "super-categories": [
+            "automobile",
+            "public transport",
+            "public transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "articulated bus",
+            "city bus",
+            "coach bus",
+            "double-decker bus",
+            "electric bus",
+            "minibus",
+            "school bus",
+            "shuttle bus",
+            "tour bus",
+            "trolleybus"
+        ],
+        "synonyms": [
+            "coach",
+            "minibus",
+            "shuttle"
+        ]
+    },
+    "motor": {
+        "super-categories": [
+            "component",
+            "device",
+            "electromechanical device",
+            "machine"
+        ],
+        "sub-categories": [
+            "cafe-racer",
+            "chopper",
+            "chopper-motorcycle",
+            "cruiser",
+            "cruiser-motorcycle",
+            "dirt-bike",
+            "dual-sport",
+            "dual-sport-motorcycle",
+            "maxi-scooter",
+            "minibike",
+            "moped",
+            "off-road-motorcycle",
+            "scooter",
+            "sport-motorcycle",
+            "sportbike",
+            "standard-motorcycle",
+            "touring-motorcycle",
+            "underbone"
+        ],
+        "synonyms": [
+            "motorbike",
+            "motorcycle",
+            "scooter"
+        ]
+    }
+}

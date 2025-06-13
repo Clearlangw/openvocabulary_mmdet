@@ -1,0 +1,285 @@
+{
+    "pedestrian": {
+        "super-categories": [
+            "human",
+            "moving object",
+            "person",
+            "road user"
+        ],
+        "sub-categories": [
+            "adult",
+            "child",
+            "cyclist",
+            "disabled person",
+            "elderly",
+            "group",
+            "jogger",
+            "person using wheelchair",
+            "person with dog",
+            "person with luggage",
+            "person with pet",
+            "person with stroller",
+            "person with suitcase",
+            "skateboarder",
+            "wheelchair user"
+        ],
+        "synonyms": [
+            "foot passenger",
+            "foot traveler",
+            "walker"
+        ]
+    },
+    "people": {
+        "super-categories": [
+            "beings",
+            "entities",
+            "living things",
+            "organisms"
+        ],
+        "sub-categories": [
+            "adult",
+            "artist",
+            "athlete",
+            "boy",
+            "child",
+            "elderly",
+            "girl",
+            "infant",
+            "leader",
+            "man",
+            "parent",
+            "student",
+            "teacher",
+            "teenager",
+            "toddler",
+            "woman",
+            "worker"
+        ],
+        "synonyms": [
+            "human",
+            "individual",
+            "person"
+        ]
+    },
+    "bicycle": {
+        "super-categories": [
+            "machine",
+            "transport",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "bmx bike",
+            "cruiser bike",
+            "electric bike",
+            "fixed-gear bike",
+            "folding bike",
+            "hybrid bike",
+            "mountain bike",
+            "recumbent bike",
+            "road bike",
+            "tandem bike",
+            "touring bike",
+            "track bike"
+        ],
+        "synonyms": [
+            "bike",
+            "cycle",
+            "pushbike"
+        ]
+    },
+    "car": {
+        "super-categories": [
+            "machine",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "convertible",
+            "coupe",
+            "hatchback",
+            "minivan",
+            "pickup truck",
+            "roadster",
+            "sedan",
+            "sports car",
+            "station wagon",
+            "suv"
+        ],
+        "synonyms": [
+            "auto",
+            "automobile",
+            "sedan"
+        ]
+    },
+    "van": {
+        "super-categories": [
+            "automobile",
+            "machine",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "box van",
+            "camper van",
+            "cargo van",
+            "conversion van",
+            "crew van",
+            "electric van",
+            "luxury van",
+            "microvan",
+            "mini van",
+            "minivan",
+            "panel van",
+            "passenger van",
+            "refrigerated van",
+            "step van"
+        ],
+        "synonyms": [
+            "cargo van",
+            "minivan",
+            "panel van"
+        ]
+    },
+    "truck": {
+        "super-categories": [
+            "machine",
+            "transport",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "box truck",
+            "dump truck",
+            "fire truck",
+            "flatbed truck",
+            "garbage truck",
+            "logging truck",
+            "pickup truck",
+            "refrigerated truck",
+            "tanker truck",
+            "tow truck"
+        ],
+        "synonyms": [
+            "lorry",
+            "pickup",
+            "pickup truck"
+        ]
+    },
+    "tricycle": {
+        "super-categories": [
+            "toy",
+            "transportation",
+            "vehicle",
+            "wheeled object"
+        ],
+        "sub-categories": [
+            "adult tricycle",
+            "cargo tricycle",
+            "children's tricycle",
+            "drift tricycle",
+            "electric tricycle",
+            "folding tricycle",
+            "hand tricycle",
+            "motorized tricycle",
+            "recumbent tricycle",
+            "tandem tricycle",
+            "toddler tricycle",
+            "touring tricycle"
+        ],
+        "synonyms": [
+            "kids trike",
+            "three-wheeler",
+            "trike"
+        ]
+    },
+    "awning-tricycle": {
+        "super-categories": [
+            "covered-structure",
+            "covered-transport",
+            "human-powered-object",
+            "outdoor-equipment",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "advertising awning-tricycle",
+            "cargo awning-tricycle",
+            "child awning-tricycle",
+            "children's awning-tricycle",
+            "delivery awning-tricycle",
+            "electric awning-tricycle",
+            "food cart awning-tricycle",
+            "ice cream awning-tricycle",
+            "manual awning-tricycle",
+            "manual pedal awning-tricycle",
+            "mobile shop awning-tricycle",
+            "mobile vending awning-tricycle",
+            "passenger awning-tricycle",
+            "pet awning-tricycle",
+            "promotional awning-tricycle",
+            "tourist awning-tricycle"
+        ],
+        "synonyms": [
+            "covered tricycle",
+            "pedicab with canopy",
+            "rickshaw tricycle"
+        ]
+    },
+    "bus": {
+        "super-categories": [
+            "automobile",
+            "machine",
+            "public transport",
+            "transport",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "airport bus",
+            "articulated bus",
+            "city bus",
+            "coach bus",
+            "double-decker bus",
+            "electric bus",
+            "mini bus",
+            "minibus",
+            "school bus",
+            "shuttle bus",
+            "tour bus",
+            "trolleybus"
+        ],
+        "synonyms": [
+            "coach",
+            "minibus",
+            "shuttle"
+        ]
+    },
+    "motor": {
+        "super-categories": [
+            "component",
+            "device",
+            "machine"
+        ],
+        "sub-categories": [
+            "ac motor",
+            "asynchronous motor",
+            "brushed motor",
+            "brushless motor",
+            "dc motor",
+            "electric motor",
+            "gear motor",
+            "hydraulic motor",
+            "induction motor",
+            "linear motor",
+            "servo motor",
+            "stepper motor",
+            "synchro motor",
+            "synchronous motor",
+            "universal motor"
+        ],
+        "synonyms": [
+            "motorbike",
+            "motorcycle",
+            "scooter"
+        ]
+    }
+}

@@ -6,9 +6,12 @@ from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import random
 from mmengine.runner.amp import autocast
 from torch import Tensor
 
+from mmcv.cnn.bricks.transformer import FFN, MultiheadAttention
 from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType
@@ -55,6 +58,368 @@ def chunks(lst: list, n: int) -> list:
 #     def forward(self, x):
 #         return x
 
+class BatchInputsRandomPromptTuning(nn.Module):
+    def __init__(self, prompt_size=400, num_prompts=2, in_channels=3):
+        super().__init__()
+        self.prompt_size = prompt_size
+        self.num_prompts = num_prompts
+        # prompt参数 shape: [num_prompts, in_channels, prompt_size, prompt_size]
+        self.prompts = nn.Parameter(torch.zeros(num_prompts, in_channels, prompt_size, prompt_size))
+        nn.init.normal_(self.prompts, std=0.02)
+
+    def forward(self, x):
+        # x: [bs, 3, h, w]
+        bs, c, h, w = x.shape
+        device = x.device
+        out = x.clone()
+        for i in range(bs):
+            used_rects = []
+            for j in range(self.num_prompts):
+                # 随机采样位置，保证不超界且不重叠
+                for _ in range(15):  # 最多尝试15次
+                    top = random.randint(0, h - self.prompt_size)
+                    left = random.randint(0, w - self.prompt_size)
+                    rect = (top, left, top + self.prompt_size, left + self.prompt_size)
+                    # 检查是否与已用区域重叠
+                    overlap = False
+                    for ut, ul, ub, ur in used_rects:
+                        if not (rect[2] <= ut or rect[0] >= ub or rect[3] <= ul or rect[1] >= ur):
+                            overlap = True
+                            break
+                    if not overlap:
+                        used_rects.append(rect)
+                        break
+                # 替换输入
+                out[i, :, top:top+self.prompt_size, left:left+self.prompt_size] += self.prompts[j]
+        return out
+
+class ClusterVisualPromptTuning(nn.Module):
+    """视觉特征的 Prompt-Tuning 模块
+    
+    考虑多尺度特征的空间对应关系，通过聚合bbox区域选择tuning位置，
+    并按比例将prompt应用到不同层级的特征上。
+    """
+    def __init__(self, embed_dim=256, prompt_size=16, cluster_num=4,scale_factors=[1, 4, 16, 64]):
+        super().__init__()
+        # 视觉 prompt 参数，可以学习
+        self.visual_prompts = nn.Parameter(torch.zeros(cluster_num, prompt_size, prompt_size, embed_dim))
+        # 初始化
+        nn.init.normal_(self.visual_prompts, std=0.02)
+        self.prompt_size = prompt_size
+        self.cluster_num = cluster_num  # 聚类中心数量
+        
+        # 定义不同层级的缩放比例
+        # 第一层是最细粒度的特征层(高分辨率)，最后一层是最粗粒度的(低分辨率)
+        # 例如：如果有4个层级，分辨率比例为[1:4:16:64]，则scale_factors应为[1, 4, 16, 64]
+        self.scale_factors = scale_factors  # 从最细粒度层到最粗粒度层
+        
+    def cluster_reference_points(self, reference_points, max_clusters=4, min_points=3):
+        """
+        对参考点进行聚类，返回聚类中心
+        
+        Args:
+            reference_points: 形状为 [bs, nq, 4]，值为 (cx, cy, w, h)
+            max_clusters: 最大聚类数量
+            min_points: 每个聚类最少包含的点数
+            
+        Returns:
+            cluster_centers: 形状为 [bs, n_clusters, 4]，聚类中心
+            cluster_weights: 形状为 [bs, n_clusters]，每个聚类的权重
+        """
+        bs, nq, _ = reference_points.shape
+        device = reference_points.device
+        
+        # 创建返回值容器
+        cluster_centers = torch.zeros(bs, self.cluster_num, 4, device=device)
+        cluster_weights = torch.zeros(bs, self.cluster_num, device=device)
+        
+        for b in range(bs):
+            # 提取当前batch的参考点
+            refs = reference_points[b]  # [nq, 4]
+            # 简单的基于距离的聚类
+            # 1. 初始化聚类中心为随机选择的max_clusters个点
+            n_clusters = min(max_clusters, nq)
+            # 随机选择n_clusters个点作为初始聚类中心
+            if nq > n_clusters:
+                random_indices = torch.randperm(nq, device=refs.device)[:n_clusters]
+                centers = refs[random_indices].clone()  # [n_clusters, 4]
+            else:
+                centers = refs.clone()  # 如果点数不足，使用所有点
+            
+            # 2. 分配点到最近的聚类
+            distances = torch.cdist(refs[:, :2], centers[:, :2])  # [nq, n_clusters]
+            cluster_ids = torch.argmin(distances, dim=1)  # [nq]
+            
+            # 3. 更新聚类中心
+            for i in range(n_clusters):
+                cluster_points = refs[cluster_ids == i]
+                if len(cluster_points) >= min_points:
+                    # 更新中心为该聚类所有点的平均值
+                    centers[i] = cluster_points.mean(dim=0)
+                    # 计算聚类权重（该聚类包含的点数）
+                    cluster_weights[b, i] = len(cluster_points)
+            
+            # 保存结果
+            cluster_centers[b, :n_clusters] = centers
+        
+        # 归一化聚类权重
+        cluster_weights = cluster_weights / (cluster_weights.sum(dim=1, keepdim=True).clamp(min=1e-6))
+        
+        return cluster_centers, cluster_weights
+    
+    def forward(self, memory, reference_points, spatial_shapes, level_start_index):
+        """
+        Args:
+            memory: 形状为 [bs, nvq, dim]
+            reference_points: 形状为 [bs, nq, 4]，值为 (cx, cy, w, h)
+            spatial_shapes: 形状为 [num_levels, 2]，表示每层特征图的 (h, w)
+            level_start_index: 形状为 [num_levels]，表示每层特征在 memory 中的起始索引
+        """
+        bs, nvq, dim = memory.shape
+        num_levels = spatial_shapes.shape[0]
+        
+        # 对参考点进行聚类，获取聚类中心和权重
+        cluster_centers, cluster_weights = self.cluster_reference_points(
+            reference_points, max_clusters=self.cluster_num)
+        
+        # 创建一个与 memory 相同形状的零张量用于存储 prompt
+        prompt_tensor = torch.zeros_like(memory)
+        
+        # 确定基准层（第一层是最细粒度的特征层）
+        base_level = 0
+        
+        # 对每个聚类中心，计算其在各层特征图中对应的位置并应用 prompt
+        for b in range(bs):
+            for c_idx, center in enumerate(cluster_centers[b]):
+                # 如果该聚类权重为0，跳过
+                if cluster_weights[b, c_idx] <= 1e-6:
+                    continue
+                    
+                cx, cy, w, h = center  # 归一化坐标 [0, 1]
+                
+                # 对每一层特征图
+                for lvl in range(num_levels):
+                    h_lvl, w_lvl = spatial_shapes[lvl]
+                    start_idx = level_start_index[lvl]
+                    
+                    # 计算该层相对于基准层的缩放比例
+                    scale_factor = self.scale_factors[lvl] if lvl < len(self.scale_factors) else 1
+                    
+                    # 计算聚类中心在当前层的坐标
+                    x_coord = int(cx * w_lvl)
+                    y_coord = int(cy * h_lvl)
+                    
+                    # 根据不同层级调整prompt的应用区域大小
+                    # 细粒度层(scale_factor小)使用较小的prompt区域，粗粒度层(scale_factor大)使用较大的prompt区域
+                    # 这是因为在粗粒度层上，一个像素对应原图的区域更大
+                    effective_prompt_size = max(4, int(self.prompt_size * scale_factor / self.scale_factors[-1]))
+                    half_size = effective_prompt_size // 2
+                    
+                    # 计算prompt区域的边界
+                    x_min = max(0, x_coord - half_size)
+                    x_max = min(w_lvl, x_coord + half_size)
+                    y_min = max(0, y_coord - half_size)
+                    y_max = min(h_lvl, y_coord + half_size)
+                    
+                    # 计算在memory中的索引范围并应用prompt
+                    for y in range(y_min, y_max):
+                        for x in range(x_min, x_max):
+                            idx = start_idx + y * w_lvl + x
+                            if idx < nvq:  # 确保索引不越界
+                                # 计算在prompt中的相对位置
+                                # 使用双线性插值来处理不同尺寸的映射
+                                p_y_ratio = (y - y_min) / max(1, y_max - y_min - 1)
+                                p_x_ratio = (x - x_min) / max(1, x_max - x_min - 1)
+                                
+                                p_y = min(int(p_y_ratio * (self.prompt_size - 1)), self.prompt_size - 1)
+                                p_x = min(int(p_x_ratio * (self.prompt_size - 1)), self.prompt_size - 1)
+                                
+                                # 应用prompt，并根据聚类权重进行加权
+                                prompt_tensor[b, idx] += self.visual_prompts[c_idx, p_y, p_x] * cluster_weights[b, c_idx]
+        
+        # 将prompt添加到原始memory
+        tuned_memory = memory + prompt_tensor
+        
+        return tuned_memory
+
+
+class SimpleScoreAdjuster(nn.Module):
+    def __init__(self, 
+                 bg_feature_dim=1, 
+                 os_proxy_dim=1, 
+                 init_config=None,
+                 # 为nan_to_num设置默认的替换值
+                 nan_replace_val=-1e5, 
+                 posinf_replace_val=1e5, # 根据您的分数范围调整
+                 neginf_replace_val=-1e5 # 根据您的分数范围调整
+                 ):
+        super().__init__()
+        self.bg_feature_dim = bg_feature_dim
+        self.os_proxy_dim = os_proxy_dim
+        self.nan_replace_val = nan_replace_val
+        self.posinf_replace_val = posinf_replace_val
+        self.neginf_replace_val = neginf_replace_val
+
+        # --- 门控结构 ---
+        self.ig_fc_bs = nn.Linear(self.bg_feature_dim, 1, bias=False)
+        self.ig_fc_os_proxy = nn.Linear(self.os_proxy_dim, 1, bias=False)
+        self.ig_bias = nn.Parameter(torch.Tensor(1))
+
+        self.ca_fc_bs = nn.Linear(self.bg_feature_dim, 1, bias=False)
+        self.ca_fc_os_proxy = nn.Linear(self.os_proxy_dim, 1, bias=False)
+        self.ca_bias = nn.Parameter(torch.Tensor(1))
+        self.adjustment_scale = nn.Parameter(torch.Tensor([0.5]))
+
+        self.pg_fc_bs = nn.Linear(self.bg_feature_dim, 1, bias=False)
+        self.pg_fc_os_proxy = nn.Linear(self.os_proxy_dim, 1, bias=False)
+        self.pg_bias = nn.Parameter(torch.Tensor(1))
+        
+        self._initialize_weights(init_config)
+
+    def _initialize_weights(self, config):
+        # ... (初始化代码保持不变) ...
+        config = config or {}
+        
+        nn.init.constant_(self.ig_fc_bs.weight, config.get('w_ig_bs', 0.1))
+        nn.init.constant_(self.ig_fc_os_proxy.weight, config.get('w_ig_os_proxy', 0.1))
+        nn.init.constant_(self.ig_bias, config.get('b_ig', -1.5))
+
+        nn.init.constant_(self.ca_fc_bs.weight, config.get('w_ca_bs', -0.3))
+        nn.init.constant_(self.ca_fc_os_proxy.weight, config.get('w_ca_os_proxy', 0.15))
+        nn.init.constant_(self.ca_bias, config.get('b_ca', 0.0))
+        with torch.no_grad():
+            self.adjustment_scale.fill_(config.get('adj_scale_init', 0.5))
+
+        nn.init.constant_(self.pg_fc_bs.weight, config.get('w_pg_bs', -0.1))
+        nn.init.constant_(self.pg_fc_os_proxy.weight, config.get('w_pg_os_proxy', 1.5))
+        nn.init.constant_(self.pg_bias, config.get('b_pg', 1.5))
+
+
+    def forward(self, enc_outputs_class_per_proposal, background_similarity_features):
+        # 1. 清理 enc_outputs_class_per_proposal 中的 inf/nan
+        # 这是处理问题的关键步骤
+        safe_enc_outputs_class = torch.nan_to_num(
+            enc_outputs_class_per_proposal, 
+            nan=self.nan_replace_val, 
+            posinf=self.posinf_replace_val, 
+            neginf=self.neginf_replace_val
+        )
+
+        # 2. 从清理后的特征中提取代理原始分数 (os_proxy)
+        os_proxy, _ = torch.max(safe_enc_outputs_class, dim=-1, keepdim=True)
+        # os_proxy 现在应该是有限值
+
+        # 3. 清理 background_similarity_features (以防万一)
+        safe_background_similarity = torch.nan_to_num(
+            background_similarity_features,
+            nan=self.nan_replace_val,
+            posinf=self.posinf_replace_val,
+            neginf=self.neginf_replace_val
+        )
+        
+        bs_f = safe_background_similarity 
+        if bs_f.ndim == 2: 
+            if self.bg_feature_dim != 1:
+                 raise ValueError(f"background_similarity is 2D, implying bg_feature_dim=1, but self.bg_feature_dim={self.bg_feature_dim}")
+            bs_f = bs_f.unsqueeze(-1)
+        elif bs_f.ndim == 3 and bs_f.shape[-1] != self.bg_feature_dim:
+            raise ValueError(f"background_similarity last dim {bs_f.shape[-1]} != self.bg_feature_dim {self.bg_feature_dim}")
+        
+        # --- 门控逻辑 ---
+        # 所有输入到线性层的都应该是清理后的有限值
+        ig_signal = self.ig_fc_bs(bs_f) + self.ig_fc_os_proxy(os_proxy) + self.ig_bias
+        ig_gate = torch.sigmoid(ig_signal)
+
+        ca_signal = self.ca_fc_bs(bs_f) + self.ca_fc_os_proxy(os_proxy) + self.ca_bias
+        candidate_adjustment_scalar = torch.tanh(ca_signal) * self.adjustment_scale
+
+        pg_signal = self.pg_fc_bs(bs_f) + self.pg_fc_os_proxy(os_proxy) + self.pg_bias
+        pg_gate = torch.sigmoid(pg_signal)
+        
+        # --- 应用调整 ---
+        # safe_enc_outputs_class 是有限值，门控值和调整量也是有限值
+        adjusted_enc_outputs_class = safe_enc_outputs_class * pg_gate + \
+                                     (candidate_adjustment_scalar * ig_gate)
+        
+        # (可选) 对最终输出再做一次清理，以防万一中间计算引入极值（但理论上激活函数会限制）
+        adjusted_enc_outputs_class = torch.nan_to_num(
+            adjusted_enc_outputs_class,
+            nan=self.nan_replace_val,
+            posinf=self.posinf_replace_val,
+            neginf=self.neginf_replace_val
+        )
+        
+        return adjusted_enc_outputs_class
+
+class TokenContrastiveLoss(nn.Module):
+    """
+    针对Token级别的特征进行对比学习的损失函数。
+
+    正样本对定义: 来自同一个batch中不同样本，但在原始token序列中处于相同位置的特征。
+    负样本对定义: 所有其他的特征对。
+
+    目标:
+    1. 拉近正样本对 (e.g., memory[0, i] 和 memory[1, i]) 的相似度。
+    2. 推远负样本对 (e.g., memory[0, i] 和 memory[0, j], memory[0, i] 和 background[1, k]) 的相似度。
+
+    Args:
+        temperature (float): 温度系数，用于缩放相似度得分，控制损失函数的锐度。
+    """
+    def __init__(self, temperature: float = 0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, text_feat: torch.Tensor) -> torch.Tensor:
+        """
+        计算文本对比损失。
+        """
+        # --- 1. 获取维度信息并验证输入 ---
+        if text_feat.dim() != 3:
+            raise ValueError("Inputs must be 3D tensors: [bs, token_num, feat_dim]")
+            
+        bs, token_num, feat_dim = text_feat.shape
+        # --- 2. 特征展平与标准化 ---
+        features = text_feat
+        features_flat = features.view(-1, feat_dim)
+        features_flat = F.normalize(features_flat, p=2, dim=1)
+        device = features.device
+        # --- 3. 创建用于识别正负样本的索引 ---
+        batch_indices = torch.arange(bs, device=device).view(bs, 1).expand(-1, token_num).reshape(-1)
+        #[0000011111]
+        token_indices = torch.arange(token_num, device=device).repeat(bs)
+        #[012012]
+        # --- 4. 计算相似度矩阵并构建正样本掩码 ---
+        similarity_matrix = torch.matmul(features_flat, features_flat.T)
+        
+        # 核心逻辑：当两个token的 'token_indices' 相同，但 'batch_indices' 不同时，它们是正样本对
+        same_token_mask = (token_indices.unsqueeze(1) == token_indices.unsqueeze(0))
+        diff_batch_mask = (batch_indices.unsqueeze(1) != batch_indices.unsqueeze(0))
+        positive_mask = same_token_mask & diff_batch_mask
+
+        # --- 5. 计算InfoNCE损失 ---
+        # 从负样本中排除自身 (i=j 的情况)
+        self_mask = torch.eye(similarity_matrix.shape[0], dtype=torch.bool, device=device)
+        
+        # 计算 logits
+        logits = similarity_matrix / self.temperature
+        logits_max, _ = torch.max(logits, dim=1, keepdim=True)
+        logits = logits - logits_max.detach()
+        # 用极小值填充对角线，使其在softmax中被忽略
+        logits.masked_fill_(self_mask, -9e15)
+
+        # 计算 log-softmax 概率
+        exp_logits = torch.exp(logits)
+        log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True))
+
+        # 针对每个锚点，计算其所有正样本的平均log-likelihood
+        # 使用 clamp(min=1) 防止在 batch_size=1 或没有正样本时出现除以零的错误
+        mean_log_prob_pos = (positive_mask * log_prob).sum(dim=1) / positive_mask.sum(dim=1).clamp(min=1)
+        
+        # 最终损失是所有锚点的平均负log-likelihood
+        loss = -mean_log_prob_pos.mean()
+
+        return loss
+
 
 @MODELS.register_module()
 class GroundingDINO(DINO):
@@ -76,9 +441,19 @@ class GroundingDINO(DINO):
                  coop_init=None,
                  coop_csc=False,
                  background_supp=False, #背景抑制background_suppression，在predecoder那里修改
-                 background_supp_mode = 1,
+                 background_supp_mode = None,
                  use_mona = False, #mona微调，使用mona对swintransformer进行微调
                  num_tokens=27,
+                 text_contrast = False,
+                 use_visual_prompt = False,
+                 visual_prompt_size = 16,
+                 visual_prompt_clusters = 4,
+                 visual_prompt_scale_factors = [1, 4, 16, 64],
+                 visual_prompt_max_ref_points = 30,
+                 use_random_input_prompt = False,
+                 #shine的参数写在了language_model那里去了
+                 use_text_attn_enhance=False,
+                 text_attn_enhance_refpath=None,
                  *args,
                  use_autocast=False,
                  **kwargs) -> None:
@@ -97,12 +472,25 @@ class GroundingDINO(DINO):
         self.coop_prompt_length=self.coop_n_ctx = 16 #可训练参数长度(左命名参考mrgdino，右名参考coop原论文)
         self.coop_prompt_channel=self.coop_ctx_dim  = 768
         self.num_tokens = num_tokens #用于告诉coop微调词的数量
+        #其余参数
+        self.text_contrast = text_contrast
+        self.use_text_attn_enhance = use_text_attn_enhance
+        self.text_attn_enhance_refpath = text_attn_enhance_refpath
         #vis端：swin微调参数
         self.use_mona = use_mona
+        self.use_visual_prompt = use_visual_prompt
+        self.visual_prompt_size = visual_prompt_size
+        self.visual_prompt_clusters = visual_prompt_clusters
+        self.visual_prompt_scale_factors = visual_prompt_scale_factors
+        self.visual_prompt_max_ref_points = visual_prompt_max_ref_points
+        self.use_random_input_prompt = use_random_input_prompt
         #VL交互：
         self.background_supp = background_supp
         self.background_supp_mode = background_supp_mode
         self.classnames = None #
+
+        self.accumulated_background_similarity = []
+        self.accumulated_original_scores = []
 
         self._special_tokens = '. '
         self.use_autocast = use_autocast
@@ -139,6 +527,31 @@ class GroundingDINO(DINO):
             self.language_model.language_backbone.body.language_dim,
             self.embed_dims,
             bias=True)
+        if self.background_supp and self.background_supp_mode == 'lstm_gating':
+            self.score_adjuster = SimpleScoreAdjuster(
+                bg_feature_dim=1, # 假设 background_similarity 输入是聚合后的标量
+                os_proxy_dim=1,   # 因为 os_proxy 是通过 max(...) keepdim=True 得到的
+                init_config={ # 您可以按需调整这些初始化值
+                    'w_ig_bs': 0.1, 'w_ig_os_proxy': 0.1, 'b_ig': -1.5,
+                    'w_ca_bs': -0.3, 'w_ca_os_proxy': 0.15, 'b_ca': 0.0, 'adj_scale_init': 0.5,
+                    'w_pg_bs': -0.1, 'w_pg_os_proxy': 1.5, 'b_pg': 1.5,
+                }
+            )
+        if self.use_text_attn_enhance:
+            self.text_attn_enhancer = MultiheadAttention(embed_dims=256,num_heads=8,batch_first=True)
+
+        if self.text_contrast:
+            self.text_contrast_loss = TokenContrastiveLoss()
+        # 添加视觉prompt-tuning模块
+        if self.use_visual_prompt:
+            self.visual_prompt_tuning = ClusterVisualPromptTuning(
+                embed_dim=self.embed_dims,
+                prompt_size=self.visual_prompt_size,
+                cluster_num=self.visual_prompt_clusters,
+                scale_factors=self.visual_prompt_scale_factors
+            )
+        if self.use_random_input_prompt:
+            self.random_input_prompt_tuning = BatchInputsRandomPromptTuning()
 
     def init_weights(self) -> None:
         """Initialize weights for Transformer and other components."""
@@ -434,16 +847,57 @@ class GroundingDINO(DINO):
             text_self_attention_masks=text_dict['masks'])
         #  dict: The dictionary of encoder outputs, which includes the
         #  `memory` of the encoder output.
+        background_text_feat = None
+        background_text_token_mask = None
+        # --- 背景抑制逻辑 ---
+        if self.background_supp:
+            background_text_dict = torch.load('/home/wuke_2024/ov202503/mmdetection/ov_text_feature/back_dict.pth',map_location=memory.device)
+            bs,_,_ = memory.shape
+            for key in background_text_dict.keys():
+                #针对不同的key
+                if background_text_dict[key].dim() == 2:
+                    background_text_dict[key] = background_text_dict[key][0]
+                    background_text_dict[key] = background_text_dict[key].unsqueeze(0).expand(bs, -1)
+                elif background_text_dict[key].dim() == 3:
+                    background_text_dict[key] = background_text_dict[key][0]
+                    if key == 'dot_mask':
+                        background_text_dict[key][0]=False
+                        background_text_dict[key][-1]=False
+                    background_text_dict[key] = background_text_dict[key].unsqueeze(0).expand(bs, -1, -1)
+                elif background_text_dict[key].dim() == 1:
+                    # dot_mask 需要保证首位和末尾为False
+                    background_text_dict[key][0]=False
+                    background_text_dict[key][-1]=False
+                    background_text_dict[key] = background_text_dict[key].unsqueeze(0).expand(bs, -1)
 
-        # print("memory shape is",memory.shape) #([2, 16320, 256])
-        # print("memory text shape is",memory_text.shape) #([2,27,256])
+            # 扩展batch维度
+            background_text_feat = background_text_dict['embedded']
+            background_text_feat=self.text_feat_map(background_text_feat)
+            background_text_token_mask = background_text_dict['dot_mask']
+            with torch.no_grad():
+                _, background_text_feat = self.encoder(
+                    query=feat,
+                    query_pos=feat_pos,
+                    key_padding_mask=feat_mask,  # for self_attn
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    valid_ratios=valid_ratios,
+                    # for text encoder
+                    memory_text=background_text_feat,
+                    text_attention_mask=~background_text_token_mask,
+                    position_ids=background_text_dict['position_ids'],
+                    text_self_attention_masks=background_text_dict['masks'])
+        #     print(background_text_dict['masks'].shape) #输出数据
+        #     print(background_text_dict['text_token_mask'].shape) #输出数据
+        #     print(type(background_text_dict['text_token_mask'])) #输出类型
         # import sys
         # sys.exit()
-
         encoder_outputs_dict = dict(
             memory=memory,
             memory_mask=feat_mask,
             spatial_shapes=spatial_shapes,
+            background_text_feat=background_text_feat,
+            background_text_token_mask=background_text_token_mask,
             memory_text=memory_text,
             text_token_mask=text_token_mask)
         return encoder_outputs_dict
@@ -455,6 +909,8 @@ class GroundingDINO(DINO):
         spatial_shapes: Tensor,
         memory_text: Tensor,
         text_token_mask: Tensor,
+        background_text_feat: Optional[Tensor] = None,
+        background_text_token_mask: Optional[Tensor] = None,
         batch_data_samples: OptSampleList = None,
     ) -> Tuple[Dict]:
         bs, _, c = memory.shape
@@ -465,91 +921,40 @@ class GroundingDINO(DINO):
         enc_outputs_class = self.bbox_head.cls_branches[
             self.decoder.num_layers](output_memory, memory_text,
                                      text_token_mask)
+
         cls_out_features = self.bbox_head.cls_branches[
             self.decoder.num_layers].max_text_len
         enc_outputs_coord_unact = self.bbox_head.reg_branches[
             self.decoder.num_layers](output_memory) + output_proposals
 
-        # 用于top-k选择的原始得分 (每个候选框在所有文本token/类别上的最大得分)
-        # original_scores 形状: (bs, num_all_proposals)
         num_all_proposals = output_proposals.shape[1]
         original_scores = enc_outputs_class.max(-1)[0]
-        alpha = 0.5*1e-2              # 用于 'score_modulation',最初为0.5
+        alpha = 0.5             # 用于 'score_modulation',最初为0.5
         m_factor = 2               # 用于 'reranking',最初为2
-        beta = 0.5*1e-2               # 用于 'reranking',最初为0.5  
-        similarity_threshold = 150.0 # 用于 'gating' (需要根据点积的范围调整) 最开始为10.0
+        beta = 0.5               # 用于 'reranking',最初为0.5  
+        similarity_threshold = -4 # 用于 'gating' (需要根据点积的范围调整) 最开始为10.0
         penalty_value = 1e5       # 用于 'gating'
-        # --- 背景抑制逻辑 ---
-        background_text_feat = torch.load('/home/wuke_2024/ov202503/mmdetection/ov_emb/background_wo_dot.pth',map_location=output_memory.device)
-        if background_text_feat.dim() == 3 and background_text_feat.shape[0] == 1:
-            background_text_feat = background_text_feat.squeeze(0)
-        # 扩展batch维度
-        background_text_feat = background_text_feat.unsqueeze(0).expand(bs, -1, -1)
-        background_text_feat=self.text_feat_map(background_text_feat)
         if self.background_supp and background_text_feat is not None:
-            # 准备 background_text_feat
-            # 预期形状: (bs, num_bg_tokens, c_feat) 或 (1, num_bg_tokens, c_feat)
-            # 也可接受 (num_bg_tokens, c_feat), 将其视为 bs=1
-            processed_bg_feat = background_text_feat
-            if processed_bg_feat.ndim == 2: # (num_bg_tokens, c_feat)
-                # 假设 bs=1 或全局背景token集合, 扩展为 (1, num_bg_tokens, c_feat)
-                processed_bg_feat = processed_bg_feat.unsqueeze(0)
-            
-            if processed_bg_feat.ndim != 3:
-                raise ValueError(
-                    f"background_text_feat has unexpected ndim ({processed_bg_feat.ndim}) after potential unsqueeze. Expected 3 (e.g., bs/1, num_bg_tokens, c_feat)."
-                )
-            
-            # num_bg_tokens = processed_bg_feat.shape[1]
-            # 计算 proposal 特征与每个背景 token 特征的点积相似度
-            # output_memory_proposals_feat: (bs, num_all_proposals, c_feat)
-            # processed_bg_feat.transpose(-1, -2): (bs_bg, c_feat, num_bg_tokens) where bs_bg can be 1 or bs
-            # proposal_bg_token_sim_matrix 形状: (bs, num_all_proposals, num_bg_tokens)
-            # torch.matmul 会自动处理批次大小的广播 (如果 processed_bg_feat 的 bs_bg=1 且 output_memory_proposals_feat 的 bs > 1)
-            proposal_bg_token_sim_matrix = torch.matmul(output_memory, 
-                                                        processed_bg_feat.transpose(-1, -2))
-            
-            # 对每个 proposal，取其与所有背景 token 相似度中的最大值
-            # background_similarity 形状: (bs, num_all_proposals)
-            background_similarity = torch.max(proposal_bg_token_sim_matrix, dim=-1)[0]
+
+            ori_background_similarity = self.bbox_head.cls_branches[
+            self.decoder.num_layers](output_memory, background_text_feat,
+                                    background_text_token_mask) #这里偷了懒
+            background_similarity = ori_background_similarity.max(-1)[0]
             # # 验证相似度(zero shot下示例)
-            # print(f'background_similarity is',background_similarity) #相似度 tensor([[151.4507, 151.4507, 151.4507,  ..., 180.0379, 173.8595, 160.4793]],
-            # print(f'original_scores is',original_scores) #最初分数 tensor([[-5.0210, -5.0210, -5.0210,  ..., -5.0174, -5.0957, -5.2854]],
+            # print(f'background_similarity is',background_similarity) 
+            # print(f'original_scores is',original_scores) 
             # background_mask = background_similarity > similarity_threshold
             # print(f'background_mask is',background_mask)
-            # # background_similarity min: 42.2682, max: 258.1486
-            # # original_scores min: -7.0973, max: -0.1072
             # print(f'background_similarity min: {background_similarity.min().item():.4f}, max: {background_similarity.max().item():.4f}')
             # print(f'original_scores min: {original_scores.min().item():.4f}, max: {original_scores.max().item():.4f}')
             # print(f'background_mask True count: {background_mask.sum().item()}')
             # print(f'background_mask False count: {(~background_mask).sum().item()}')
-            # import numpy as np
-            # # 假设 background_similarity, original_scores 都是 [bs, num_proposals] 的 tensor
-            # np.save('/home/wuke_2024/ov202503/mmdetection/zero_shot_background_similarity.npy', background_similarity.cpu().numpy())
-            # np.save('/home/wuke_2024/ov202503/mmdetection/zero_shot_original_scores.npy', original_scores.cpu().numpy())
-            # import sys
-            # sys.exit()
-            # # 验证相似度(full training下示例)
-            # print(f'background_similarity is',background_similarity) #相似度 tensor([[146.5329, 146.5329, 146.5329,  ..., 160.8054, 160.1912, 137.2802]],
-            # print(f'original_scores is',original_scores) #最初分数 tensor([[-4.5432, -4.5432, -4.5432,  ..., -5.1797, -5.1553, -4.9001]],
-            # background_mask = background_similarity > similarity_threshold
-            # print(f'background_mask is',background_mask)
-            # # 统计信息
-            # # background_similarity min: 44.5390, max: 275.4955
-            # # original_scores min: -7.1635, max: 1.3547
-            # print(f'background_similarity min: {background_similarity.min().item():.4f}, max: {background_similarity.max().item():.4f}')
-            # print(f'original_scores min: {original_scores.min().item():.4f}, max: {original_scores.max().item():.4f}')
-            # print(f'background_mask True count: {background_mask.sum().item()}')
-            # print(f'background_mask False count: {(~background_mask).sum().item()}')
-            # import numpy as np
-            # # 假设 background_similarity, original_scores 都是 [bs, num_proposals] 的 tensor
-            # np.save('/home/wuke_2024/ov202503/mmdetection/full_training_background_similarity.npy', background_similarity.cpu().numpy())
-            # np.save('/home/wuke_2024/ov202503/mmdetection/full_training_original_scores.npy', original_scores.cpu().numpy())
-            # import sys
-            # sys.exit()
+            # self.accumulated_background_similarity.append(background_similarity.cpu().numpy())
+            # self.accumulated_original_scores.append(original_scores.cpu().numpy())
+
             if self.background_supp_mode == 'score_modulation':
                 # 方案1: 用背景相似度调整原始得分
-                modulated_scores = original_scores - alpha * background_similarity
+                modulated_scores = original_scores - alpha * (background_similarity - similarity_threshold)
                 topk_indices = torch.topk(modulated_scores, k=self.num_queries, dim=1)[1]
                 # print(f"使用score_modulation。原始最高分: {original_scores.max().item()}, 调整后最高分: {modulated_scores.max().item()}")
 
@@ -568,8 +973,10 @@ class GroundingDINO(DINO):
                 # 计算这M个候选框与背景token的最大相似度
                 # top_m_output_memory_feat: (bs, M, c_feat)
                 # proposal_m_bg_token_sim_matrix 形状: (bs, M, num_bg_tokens)
-                proposal_m_bg_token_sim_matrix = torch.matmul(top_m_output_memory_feat,
-                                                              processed_bg_feat.transpose(-1, -2))
+
+                proposal_m_bg_token_sim_matrix =  self.bbox_head.cls_branches[
+                self.decoder.num_layers](top_m_output_memory_feat, background_text_feat,
+                                        background_text_token_mask)
                 background_similarity_m = torch.max(proposal_m_bg_token_sim_matrix, dim=-1)[0] # (bs, M)
                 
                 reranked_scores_m = top_m_original_scores - beta * background_similarity_m
@@ -584,7 +991,45 @@ class GroundingDINO(DINO):
                 penalized_scores = original_scores - background_mask.float() * penalty_value
                 topk_indices = torch.topk(penalized_scores, k=self.num_queries, dim=1)[1]
                 # print(f"使用gating。被掩码的大致数量: {background_mask.sum().item() / bs}")
-
+            elif self.background_supp_mode == 'gating_v2':
+                # 方案4：避免前景分数本身非常高的被抑制（），使用非学习参数的固定参数控制门控行为
+                # --- 在 pre_decoder 方法内部，计算完 original_scores 和 background_similarity 之后 ---
+                # 乘法门控机制的参数 (这些最好是类的属性或者可配置的)
+                self.bg_sensitivity_pivot = -4.0  # 背景相似度抑制起始点 (接近 full_train 背景相似度的75%分位数)
+                self.bg_sensitivity_steepness = 2.0 # 当背景相似度增加时，门关闭的陡峭程度
+                self.score_rescue_pivot = -1.0     # 原始得分"救援"起始点 (full_train 长尾分布中表现开始显著变好的区域)
+                self.score_rescue_steepness = 1.5  # 高原始得分能够阻止或减缓门关闭的强度
+                self.min_gate_multiplier = 0.15    # 门控乘数的最小值，防止得分完全变为零
+                # 1. 计算背景相似度带来的抑制趋势
+                #    如果 background_similarity 比 bg_sensitivity_pivot 更正 (更像背景)，suppression_raw 为正且增大
+                suppression_raw = (background_similarity - self.bg_sensitivity_pivot) * self.bg_sensitivity_steepness
+                # 2. 计算原始得分带来的救援趋势
+                #    如果 original_scores 比 score_rescue_pivot 更正 (得分更高)，rescue_effect 为正且增大
+                rescue_effect = (original_scores - self.score_rescue_pivot) * self.score_rescue_steepness
+                # 3. 结合抑制和救援趋势，得到门控控制信号
+                #    我们希望：如果抑制趋势强且救援趋势弱，则信号为正 (倾向于关闭门，即抑制)
+                #    如果抑制趋势弱或救援趋势强，则信号为负 (倾向于打开门，即不抑制或少抑制)
+                gate_control_signal = suppression_raw - rescue_effect
+                # 4. 使用 tanh 函数将控制信号映射到 (-1, 1) 区间
+                #    tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+                #    如果 gate_control_signal 非常正 (强抑制信号)，tanh -> 1
+                #    如果 gate_control_signal 非常负 (弱抑制或强救援)，tanh -> -1
+                suppression_factor_tanh = torch.tanh(gate_control_signal)
+                # 5. 将 tanh 输出的抑制因子 (-1到1) 转换为最终的门控乘数 (min_gate_multiplier 到 1)
+                #    如果 suppression_factor_tanh = -1 (弱抑制或者强救援)，则 gate_multiplier = 2 - min_gate_multiplier,实现增强
+                #    如果 suppression_factor_tanh = 1 (最大抑制)，则 gate_multiplier = min_gate_multiplier
+                gate_multiplier = 1.0 - suppression_factor_tanh * (1.0 - self.min_gate_multiplier)
+                # 6. 应用门控，得到调整后的分数
+                final_scores_for_selection = original_scores * gate_multiplier
+                # 7. 使用调整后的分数进行 top-k 选择
+                topk_indices = torch.topk(final_scores_for_selection, k=self.num_queries, dim=1)[1]
+            elif self.background_supp_mode == 'lstm_gating':
+                # 方案5：使用可学习的参数控制background分数对前景分数的抑制程度
+                adjusted_enc_outputs_class = self.score_adjuster(
+                    enc_outputs_class,
+                    background_similarity
+                )
+                topk_indices = torch.topk(adjusted_enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
             else: 
                 topk_indices = torch.topk(original_scores, k=self.num_queries, dim=1)[1]
         else:
@@ -601,17 +1046,27 @@ class GroundingDINO(DINO):
 
         # topk_indices = torch.topk(
         #     enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
-
-        topk_score = torch.gather(
-            enc_outputs_class, 1,
-            topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
+        if self.background_supp and self.background_supp_mode == 'lstm_gating':
+            topk_score = torch.gather(
+                adjusted_enc_outputs_class, 1,
+                topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
+        else:
+            topk_score = torch.gather(
+                enc_outputs_class, 1,
+                topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
+        
         topk_coords_unact = torch.gather(
             enc_outputs_coord_unact, 1,
             topk_indices.unsqueeze(-1).repeat(1, 1, 4))
         topk_coords = topk_coords_unact.sigmoid()
         topk_coords_unact = topk_coords_unact.detach()
-
-
+        if self.text_contrast:
+            if not self.background_supp:
+                text_contrast_loss = self.text_contrast_loss(memory_text)
+            else:
+                ft = torch.cat([background_text_feat, memory_text], dim=1)
+                text_contrast_loss = self.text_contrast_loss(ft)
+        
         query = self.query_embedding.weight[:, None, :]
         query = query.repeat(1, bs, 1).transpose(0, 1)
         if self.training:
@@ -623,8 +1078,24 @@ class GroundingDINO(DINO):
         else:
             reference_points = topk_coords_unact
             dn_mask, dn_meta = None, None
-        reference_points = reference_points.sigmoid()
-
+        reference_points = reference_points.sigmoid()   
+        # print("reference_points.shape is",reference_points.shape)
+        # 应用视觉prompt-tuning
+        if self.use_visual_prompt:
+            level_start_index = torch.cat((
+                spatial_shapes.new_zeros((1, )),  # (num_level)
+                spatial_shapes.prod(1).cumsum(0)[:-1])) #每段开头索引
+            visual_prompt_coords_unact = torch.gather(
+                enc_outputs_coord_unact, 1,
+                topk_indices[:,:self.visual_prompt_max_ref_points].unsqueeze(-1).repeat(1, 1, 4))
+            # print("visual_prompt_coords_unact.shape is",visual_prompt_coords_unact.shape)
+            # print("visual_prompt_coords_unact is",visual_prompt_coords_unact)
+            # import sys
+            # sys.exit()
+            visual_prompt_coords = visual_prompt_coords_unact.sigmoid()
+            memory = self.visual_prompt_tuning(
+                memory, visual_prompt_coords, spatial_shapes, level_start_index)
+        
         decoder_inputs_dict = dict(
             query=query,
             memory=memory,
@@ -643,10 +1114,14 @@ class GroundingDINO(DINO):
         # append text_feats to head_inputs_dict
         head_inputs_dict['memory_text'] = memory_text
         head_inputs_dict['text_token_mask'] = text_token_mask
+        if self.text_contrast and self.training:
+            head_inputs_dict['text_contrast_loss'] = text_contrast_loss
         return decoder_inputs_dict, head_inputs_dict
 
     def loss(self, batch_inputs: Tensor,
              batch_data_samples: SampleList) -> Union[dict, list]:
+        if self.use_random_input_prompt:
+            batch_inputs = self.random_input_prompt_tuning(batch_inputs)
         text_prompts = [
             data_samples.text for data_samples in batch_data_samples
         ]
@@ -758,7 +1233,26 @@ class GroundingDINO(DINO):
             text_dict['embedded'] = fake_coop+text_dict['embedded']
         if self.text_feat_map is not None:
             text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
-        
+        if self.use_text_attn_enhance:
+            text_bs,_,_ = text_dict['embedded'].shape
+            concept_ft = torch.load(self.text_attn_enhance_refpath,map_location=text_dict['embedded'].device)
+            # print(concept_ft)
+            # print(concept_ft.shape)
+            # import sys
+            # sys.exit()
+            if concept_ft.dim() == 2:
+                concept_ft = concept_ft.unsqueeze(0).expand(text_bs, -1, -1)
+            elif concept_ft.dim() == 3:
+                concept_ft = concept_ft[0].unsqueeze(0).expand(text_bs, -1, -1)
+            else:
+                print(f"concept_ft.shape is {concept_ft}")
+                print("error in the text_attn_enhancer shape")
+                import sys
+                sys.exit()
+            concept_ft = self.text_feat_map(concept_ft)
+            text_dict['embedded'] = self.text_attn_enhancer(query=text_dict['embedded'],key=concept_ft,value=concept_ft)
+
+
 
         # #TODO：Coop早GDINO第五处实现，还原att
         # if self.coop:
@@ -785,15 +1279,28 @@ class GroundingDINO(DINO):
                 visual_features = self.extract_feat(batch_inputs)
         else:
             visual_features = self.extract_feat(batch_inputs)
-        #embv [2,27,256]
+        # print("visual_features is",visual_features)
+        # print(len(visual_features))
+        # # print("visual_features.shape is",visual_features.shape)
+        # print("visual_features[0] is",visual_features[0])
+        # print("visual_features[0].shape is",visual_features[0].shape)
+        # print("visual_features[0][0] is",visual_features[0][0])
+        # print("visual_features[0][0].shape is",visual_features[0][0].shape)
+        # import sys
+        # sys.exit()
+        #emb-t [2,27,256]
         head_inputs_dict = self.forward_transformer(visual_features, text_dict,
                                                     batch_data_samples)
-
+        text_contrast_loss = head_inputs_dict.pop('text_contrast_loss', None)
         losses = self.bbox_head.loss(
             **head_inputs_dict, batch_data_samples=batch_data_samples)
+        if self.text_contrast and self.training:
+            losses['text_contrast_loss'] = text_contrast_loss
         return losses
 
     def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
+        if self.use_random_input_prompt:
+            batch_inputs = self.random_input_prompt_tuning(batch_inputs)
         text_prompts = []
         enhanced_text_prompts = []
         tokens_positives = []
@@ -859,6 +1366,23 @@ class GroundingDINO(DINO):
                 if self.text_feat_map is not None:
                     text_dict['embedded'] = self.text_feat_map(
                         text_dict['embedded'])
+                if self.use_text_attn_enhance:
+                    text_bs,_,_ = text_dict['embedded'].shape
+                    concept_ft = torch.load(self.text_attn_enhance_refpath,map_location=text_dict['embedded'].device)
+                    # print(concept_ft)
+                    # print(concept_ft.shape)
+                    # import sys
+                    # sys.exit()
+                    if concept_ft.dim() == 2:
+                        concept_ft = concept_ft.unsqueeze(0).expand(text_bs, -1, -1)
+                    elif concept_ft.dim() == 3:
+                        concept_ft = concept_ft[0].unsqueeze(0).expand(text_bs, -1, -1)
+                    else:
+                        print("error in the text_attn_enhancer shape")
+                        import sys
+                        sys.exit()
+                    concept_ft = self.text_feat_map(concept_ft)
+                    text_dict['embedded'] = self.text_attn_enhancer(query=text_dict['embedded'],key=concept_ft,value=concept_ft)
 
                 batch_data_samples[
                     0].token_positive_map = token_positive_maps_once
@@ -893,6 +1417,23 @@ class GroundingDINO(DINO):
             if self.text_feat_map is not None:
                 text_dict['embedded'] = self.text_feat_map(
                     text_dict['embedded'])
+            if self.use_text_attn_enhance:
+                text_bs,_,_ = text_dict['embedded'].shape
+                concept_ft = torch.load(self.text_attn_enhance_refpath,map_location=text_dict['embedded'].device)
+                # print(concept_ft)
+                # print(concept_ft.shape)
+                # import sys
+                # sys.exit()
+                if concept_ft.dim() == 2:
+                    concept_ft = concept_ft.unsqueeze(0).expand(text_bs, -1, -1)
+                elif concept_ft.dim() == 3:
+                    concept_ft = concept_ft[0].unsqueeze(0).expand(text_bs, -1, -1)
+                else:
+                    print("error in the text_attn_enhancer shape")
+                    import sys
+                    sys.exit()
+                concept_ft = self.text_feat_map(concept_ft)
+                text_dict['embedded'] = self.text_attn_enhancer(query=text_dict['embedded'],key=concept_ft,value=concept_ft)
 
             is_rec_tasks = []
             for i, data_samples in enumerate(batch_data_samples):
@@ -930,7 +1471,7 @@ class GroundingDINO(DINO):
                 pred_instances.label_names = label_names
             data_sample.pred_instances = pred_instances
         return batch_data_samples
-
+            
 # class CoopPromptLearner(nn.Module):
 #     def __init__(self, cfg, classnames, clip_model):
 #         super().__init__()
@@ -1515,4 +2056,3 @@ class GroundingDINO(DINO):
 #         nn.init.constant_(self.weight, val=zero_value)
 #         if self.bias is not None:
 #             nn.init.constant_(self.bias, val=zero_value)
-            

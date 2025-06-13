@@ -1,0 +1,277 @@
+{
+    "pedestrian": {
+        "super-categories": [
+            "human",
+            "living thing",
+            "moving object",
+            "person",
+            "road user"
+        ],
+        "sub-categories": [
+            "adult",
+            "adult pedestrian",
+            "child",
+            "child pedestrian",
+            "crossing pedestrian",
+            "cyclist",
+            "cyclist pedestrian",
+            "disabled pedestrian",
+            "dog-walking pedestrian",
+            "elderly",
+            "elderly pedestrian",
+            "female pedestrian",
+            "group pedestrian",
+            "jogger",
+            "jogger pedestrian",
+            "jogging pedestrian",
+            "male pedestrian",
+            "pedestrian with stroller",
+            "person with disability",
+            "person with luggage",
+            "person with pet",
+            "person with stroller",
+            "skateboarder",
+            "skateboarder pedestrian",
+            "standing pedestrian",
+            "walking pedestrian"
+        ]
+    },
+    "people": {
+        "super-categories": [
+            "entities",
+            "living things",
+            "organisms"
+        ],
+        "sub-categories": [
+            "adult",
+            "artist",
+            "athlete",
+            "baby",
+            "child",
+            "elder",
+            "elderly",
+            "infant",
+            "leader",
+            "man",
+            "parent",
+            "senior",
+            "student",
+            "teacher",
+            "teenager",
+            "woman",
+            "worker"
+        ]
+    },
+    "bicycle": {
+        "super-categories": [
+            "Machine",
+            "Sports Equipment",
+            "Transport",
+            "Transportation",
+            "Vehicle",
+            "machine",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "BMX bike",
+            "Cargo bike",
+            "Cruiser bike",
+            "Electric bike",
+            "Folding bike",
+            "Hybrid bike",
+            "Mountain bike",
+            "Recumbent bike",
+            "Road bike",
+            "Touring bike",
+            "Track bike"
+        ]
+    },
+    "car": {
+        "super-categories": [
+            "machine",
+            "product",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "Convertible",
+            "Coupe",
+            "Electric Car",
+            "Hatchback",
+            "Luxury Car",
+            "Minivan",
+            "Pickup Truck",
+            "SUV",
+            "Sedan",
+            "Sports Car",
+            "Station Wagon"
+        ]
+    },
+    "van": {
+        "super-categories": [
+            "machine",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "Box van",
+            "Camper van",
+            "Cargo van",
+            "Conversion van",
+            "Crew van",
+            "Mini van",
+            "Minivan",
+            "Panel van",
+            "Passenger van",
+            "Refrigerated van",
+            "Step van"
+        ]
+    },
+    "truck": {
+        "super-categories": [
+            "machine",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "Box truck",
+            "Dump truck",
+            "Fire truck",
+            "Flatbed truck",
+            "Garbage truck",
+            "Logging truck",
+            "Pickup truck",
+            "Refrigerated truck",
+            "Semi-truck",
+            "Tanker truck",
+            "Tow truck",
+            "box",
+            "cement",
+            "dump",
+            "fire",
+            "flatbed",
+            "garbage",
+            "pickup",
+            "refrigerated",
+            "tanker",
+            "tow"
+        ]
+    },
+    "tricycle": {
+        "super-categories": [
+            "cycle",
+            "toy",
+            "vehicle",
+            "wheeled object"
+        ],
+        "sub-categories": [
+            "Adult tricycle",
+            "Cargo tricycle",
+            "Drift tricycle",
+            "Electric tricycle",
+            "Folding tricycle",
+            "Hand-powered tricycle",
+            "Kids tricycle",
+            "Racing tricycle",
+            "Recumbent tricycle",
+            "Tandem tricycle",
+            "adult tricycle",
+            "cargo tricycle",
+            "drift tricycle",
+            "electric tricycle",
+            "folding tricycle",
+            "hand tricycle",
+            "hand-powered tricycle",
+            "recumbent tricycle",
+            "rickshaw tricycle",
+            "tandem tricycle",
+            "toddler tricycle",
+            "touring tricycle"
+        ]
+    },
+    "awning-tricycle": {
+        "super-categories": [
+            "commercial-equipment",
+            "equipment",
+            "outdoor-equipment",
+            "outdoor-structure",
+            "shade-structure",
+            "structure",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "Advertising awning-tricycle",
+            "Cargo awning-tricycle",
+            "Child awning-tricycle",
+            "Electric awning-tricycle",
+            "Food cart awning-tricycle",
+            "Ice cream awning-tricycle",
+            "Manual pedal awning-tricycle",
+            "Mobile vending awning-tricycle",
+            "Passenger awning-tricycle",
+            "Tourist awning-tricycle",
+            "advertising awning-tricycle",
+            "ambulant-market awning-tricycle",
+            "childrens awning-tricycle",
+            "delivery awning-tricycle",
+            "food-cart awning-tricycle",
+            "ice cream awning-tricycle",
+            "ice-cream awning-tricycle",
+            "market vendor awning-tricycle",
+            "mobile shop awning-tricycle",
+            "mobile-vendor awning-tricycle",
+            "passenger awning-tricycle",
+            "pet transport awning-tricycle",
+            "photobooth awning-tricycle",
+            "school awning-tricycle",
+            "tourist guide awning-tricycle",
+            "tourist-guide awning-tricycle"
+        ]
+    },
+    "bus": {
+        "super-categories": [
+            "machine",
+            "public transport",
+            "public transportation",
+            "transportation",
+            "vehicle"
+        ],
+        "sub-categories": [
+            "Articulated bus",
+            "City bus",
+            "Coach bus",
+            "Double-decker bus",
+            "Electric bus",
+            "Mini bus",
+            "Minibus",
+            "School bus",
+            "Shuttle bus",
+            "Tour bus",
+            "Trolleybus"
+        ]
+    },
+    "motor": {
+        "super-categories": [
+            "Component",
+            "Device",
+            "Machine",
+            "device",
+            "machine",
+            "mechanical component"
+        ],
+        "sub-categories": [
+            "AC motor",
+            "Brushed motor",
+            "Brushless motor",
+            "DC motor",
+            "Gear motor",
+            "Induction motor",
+            "Linear motor",
+            "Servo motor",
+            "Stepper motor",
+            "Synchronous motor",
+            "Universal motor"
+        ]
+    }
+}

@@ -241,6 +241,12 @@ class CocoMetric(BaseMetric):
                 data['bbox'] = self.xyxy2xywh(bboxes[i])
                 data['score'] = float(scores[i])
                 data['category_id'] = self.cat_ids[label]
+                # try:
+                #     data['category_id'] = self.cat_ids[label]
+                # except Exception as e:
+                #     print(f"发生异常: {e}")
+                #     print("self.cat_ids:", self.cat_ids)
+                #     print("label:", label)
                 bbox_json_results.append(data)
 
             if segm_json_results is None:

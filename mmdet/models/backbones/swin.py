@@ -21,7 +21,7 @@ from ..layers import PatchEmbed, PatchMerging
 from .lora_layers import MergedLinear
 
 class AdapterFFN(FFN):
-  def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         # 调用父类MMCV_FFN的__init__方法
         # *args 和 **kwargs 会透传所有原始FFN的参数
         super().__init__(*args, **kwargs)
@@ -58,6 +58,7 @@ class WindowMSA(BaseModule):
         proj_drop_rate (float, optional): Dropout ratio of output. Default: 0.
         init_cfg (dict | None, optional): The Config for initialization.
             Default: None.
+        lora_mode (bool, optional): Whether to use lora. Default: False.
     """
 
     def __init__(self,
@@ -68,7 +69,7 @@ class WindowMSA(BaseModule):
                  qk_scale=None,
                  attn_drop_rate=0.,
                  proj_drop_rate=0.,
-                 init_cfg=None):
+                 init_cfg=None,lora_mode=False):
 
         super().__init__()
         self.embed_dims = embed_dims
@@ -374,9 +375,9 @@ class SwinBlock(BaseModule):
         lora_mode = False
         if finetune_mode == 'lora':
             lora_mode = True
-        adpater_mode = False
+        adapter_mode = False
         if finetune_mode == 'adapter':
-            adpater_mode = True
+            adapter_mode = True
         self.norm1 = build_norm_layer(norm_cfg, embed_dims)[1]
         self.attn = ShiftWindowMSA(
             embed_dims=embed_dims,
@@ -390,10 +391,10 @@ class SwinBlock(BaseModule):
             dropout_layer=dict(type='DropPath', drop_prob=drop_path_rate),
             init_cfg=None,
             lora_mode=lora_mode,
-            adpater_mode=adpater_mode)
+            adapter_mode=adapter_mode)
 
         self.norm2 = build_norm_layer(norm_cfg, embed_dims)[1]
-        if adpater_mode:
+        if adapter_mode:
             self.ffn = AdapterFFN(
                 embed_dims=embed_dims,
                 feedforward_channels=feedforward_channels,

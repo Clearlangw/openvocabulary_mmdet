@@ -2,8 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # 加载数据
-background_similarity = np.load('/home/wuke_2024/ov202503/mmdetection/full_training_background_similarity.npy').flatten()
-original_scores = np.load('/home/wuke_2024/ov202503/mmdetection/full_training_original_scores.npy').flatten()
+background_similarity = np.load('/home/wuke_2024/ov202503/mmdetection/right_zero_shot_background_similarity.npy').flatten()
+original_scores = np.load('/home/wuke_2024/ov202503/mmdetection/right_zero_shot_original_scores.npy').flatten()
 
 plt.figure(figsize=(10, 5))
 
@@ -22,4 +22,4 @@ plt.xlabel('original_scores')
 plt.ylabel('Count')
 
 plt.tight_layout()
-plt.savefig('full_training_score_distribution.png')  # 保存为图片
+plt.savefig('right_zero_shot_score_distribution.png')  # 保存为图片

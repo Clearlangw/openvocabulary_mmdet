@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
-from typing import Sequence,Optional
+from typing import Sequence,Optional,List
 
 import torch
 from mmengine.model import BaseModel
@@ -215,6 +215,10 @@ class BertModel(BaseModel):
                  num_layers_of_embedded: int = 1,
                  use_checkpoint: bool = False,
                  requires_grad: bool = False,
+                 use_shine: bool = False,
+                 shine_prompt_path: Optional[str] = None,
+                 shine_prompt_cls_list: Optional[List[str]] = None,
+                 shine_inplace_token_num: Optional[int] = None,
                  **kwargs) -> None:
 
         super().__init__(**kwargs)
@@ -249,6 +253,10 @@ class BertModel(BaseModel):
             self.special_tokens = self.tokenizer.convert_tokens_to_ids(
                 special_tokens_list)
         self.coop=None
+        self.use_shine = use_shine
+        self.shine_prompt_path = shine_prompt_path
+        self.shine_prompt_cls_list = shine_prompt_cls_list
+        self.shine_inplace_token_num = shine_inplace_token_num
 
     def add_coop_prompt(self,coop_prompt_length,coop_prompt_channel,coop_init,coop_csc,csc_cls_num=10):
         self.coop = CoOpModule(coop_prompt_length,coop_prompt_channel,coop_init,coop_csc,csc_cls_num)
@@ -303,6 +311,20 @@ class BertModel(BaseModel):
             'position_ids': position_ids,
             'token_type_ids': token_type_ids
         }
+        # print("___________________________________________________")
+        # word_ids = tokenized.word_ids()
+        # # 打印结果
+        # tokens = self.tokenizer.convert_ids_to_tokens(tokenized['input_ids'][0])
+        # for i, (token, word_id) in enumerate(zip(tokens, word_ids)):
+        #     print(f"Token {i}: {token}, belongs to word index: {word_id}")
+        # import sys
+        # sys.exit()
+        # dot_token_id = self.tokenizer.convert_tokens_to_ids('.')
+        # # 创建一个掩码，标记出在 actual_token_ids 中哪些不是点号
+        # dot_mask_for_actual_tokens = (tokenized['input_ids'] != dot_token_id)
+        # print(f"dot_mask_for_actual_tokens is",dot_mask_for_actual_tokens)
+        # import sys
+        # sys.exit()
         # print(f"tokenizer_input['input_ids'].shape is {tokenizer_input['input_ids'].shape} ")
         # print(f"tokenized['attention_mask'].shape is {tokenized['attention_mask'].shape} ") #[2,27]
         # print(f"tokenizer_input['attention_mask'].shape is {tokenizer_input['attention_mask'].shape} ")
@@ -321,11 +343,57 @@ class BertModel(BaseModel):
                 #实际上bert的tokenizer的 attention_mask 是指示哪些 token 是有效的
                 language_dict_features['masks'] = torch.cat((language_dict_features['masks'][:,:1], language_dict_features['masks'][:,1+self.coop.prompt_length:]),dim=1)
                 language_dict_features['masks'] = torch.cat((language_dict_features['masks'][:,:,:1], language_dict_features['masks'][:,:,1+self.coop.prompt_length:]),dim=2)
-                
+            if self.use_shine:
+                # print(f"language_dict_features['embedded'].shape is {language_dict_features['embedded'].shape}")
+                #TODO:写个cache_path不用手动替换
+                inplace_device = language_dict_features['embedded'].device
+                current_pos = 1
+                for class_name in self.shine_prompt_cls_list:
+                    feature_filename = f"{class_name}_feature.pth"
+                    feature_path = os.path.join(self.shine_prompt_path, feature_filename)
+                    if not os.path.exists(feature_path):
+                        print(f"  -> 警告: 未找到特征文件 {feature_path}，跳过该类别。")
+                        # 更新位置以便下一个类别能被正确放置
+                        current_pos += self.shine_inplace_token_num + 1
+                        continue
+                    try:
+                        # 加载预计算的特征
+                        loaded_feature = torch.load(feature_path, map_location=inplace_device)
+                        # 验证加载的特征形状是否正确
+                        expected_shape = (1, self.shine_inplace_token_num, language_dict_features['embedded'].shape[-1])
+                        if loaded_feature.shape != expected_shape:
+                            print(f"  -> 警告: 特征 {feature_filename} 形状不匹配。")
+                            print(f"     期望形状: {expected_shape}, 实际形状: {loaded_feature.shape}")
+                            current_pos += self.shine_inplace_token_num + 1
+                            continue
+                        # 定义要替换的目标切片
+                        start_index = current_pos
+                        end_index = current_pos + self.shine_inplace_token_num
+                        # 执行替换操作
+                        # PyTorch的广播机制会自动处理 batch size (bs)
+                        language_dict_features['embedded'][:, start_index:end_index, :] = loaded_feature
+                        # 为下一个类别更新起始位置
+                        current_pos += self.shine_inplace_token_num + 1
+                        # print(current_pos)
+                        # print(f"替换完成")
+                    except Exception as e:
+                        print(f"  -> 处理文件 {feature_path} 时发生错误: {e}")
+                        # 同样需要更新位置
+                        current_pos += self.shine_inplace_token_num + 1
             language_dict_features['position_ids'] = position_ids
             language_dict_features[
                 'text_token_mask'] = tokenized.attention_mask.bool()
-            # print(language_dict_features.keys())
+            #NOTE:这里可以用来保存结果，因为保证了参数和模型原来的参数完全一致方便更改bert的参数
+            # language_dict_features['dot_mask'] =  torch.tensor([ True,  True, False,  True, False,  True, False,  True, False,  True,
+            #     False,  True, False,  True, False,  True, False,  True, False,  True,
+            #     False,  True, False,  True, False,  True, False,  True, False,  True,
+            #     False,  True, False,  True, False,  True, False,  True, False,  True,
+            #     False,  True], device=language_dict_features['embedded'].device)
+            # # print(language_dict_features.keys())
+            # # import sys
+            # # sys.exit()
+            # torch.save(language_dict_features,'/home/wuke_2024/ov202503/mmdetection/ov_text_feature/back_dict.pth')
+            # torch.save(language_dict_features['embedded'],'/home/wuke_2024/ov202503/mmdetection/ov_text_feature/visdrone_concept.pth')
             # import sys
             # sys.exit()
         return language_dict_features
@@ -563,6 +631,20 @@ class BertEncoder(nn.Module):
             embedded = features
         # print("embedded.shape is",embedded.shape) #[bs=2,token_len=27,language_dim=768]
         # print("embeded is",embedded)
+        # mask = torch.tensor([ True,  True, False,  True, False,  True, False,  True, False,  True,
+        # False,  True, False,  True, False,  True, False,  True, False,  True,
+        # False,  True, False,  True, False,  True, False,  True, False,  True,
+        # False,  True, False,  True, False,  True, False,  True, False,  True,
+        # False,  True], device=embedded.device)
+        # # 确保mask的维度与tokens维度匹配
+        # assert mask.size(0) == embedded.size(1), f"Mask length {mask.size(0)} doesn't match token length {embedded.size(1)}"
+        # # 使用布尔索引选择True位置的特征
+        # embedded = embedded[:, mask, :]
+        # # 移除padding
+        # embedded = embedded[:,1:-1,:]
+        # path = "/home/wuke_2024/ov202503/mmdetection/ov_text_feature/dino_bert_background_feature.pth"
+        # torch.save(embedded, path)
+        # print(f"embedded.shape is",embedded.shape)
         # import sys
         # sys.exit()
         results = {

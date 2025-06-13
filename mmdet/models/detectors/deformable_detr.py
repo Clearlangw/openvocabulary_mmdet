@@ -203,7 +203,6 @@ class DeformableDETR(DetectionTransformer):
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             mask_flatten.append(mask)
             spatial_shapes.append(spatial_shape)
-
         # (bs, num_feat_points, dim)
         feat_flatten = torch.cat(feat_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
@@ -224,7 +223,6 @@ class DeformableDETR(DetectionTransformer):
         else:
             valid_ratios = mlvl_feats[0].new_ones(batch_size, len(mlvl_feats),
                                                   2)
-
         encoder_inputs_dict = dict(
             feat=feat_flatten,
             feat_mask=mask_flatten,

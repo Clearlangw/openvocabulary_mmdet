@@ -100,21 +100,24 @@ def analyze_score_distributions(zero_shot_bg, zero_shot_ori, full_train_bg, full
     data = [zero_shot_ori, full_train_ori, zero_shot_bg, full_train_bg]
     labels = ['Zeroshot\nOriginal', 'Full train\nOriginal', 
               'Zeroshot\nBackground', 'Full train\nBackground']
-    plt.boxplot(data, tick_labels=labels)
+    plt.boxplot(data, labels=labels)
     plt.title('Box Plot Comparison')
     plt.xticks(rotation=45)
     
     plt.tight_layout()
-    plt.savefig('score_distribution_analysis.png')
+    plt.savefig('val_score_distribution_analysis.png')
     plt.close()
 
 # 使用示例
 if __name__ == "__main__":
     # 加载数据
-    zero_shot_bg = np.load('/home/wuke_2024/ov202503/mmdetection/zero_shot_background_similarity.npy').flatten()
-    zero_shot_ori = np.load('/home/wuke_2024/ov202503/mmdetection/zero_shot_original_scores.npy').flatten()
-    full_train_bg = np.load('/home/wuke_2024/ov202503/mmdetection/full_training_background_similarity.npy').flatten()
-    full_train_ori = np.load('/home/wuke_2024/ov202503/mmdetection/full_training_original_scores.npy').flatten()
-    
+    # zero_shot_bg = np.load('/home/wuke_2024/ov202503/mmdetection/right_zero_shot_background_similarity.npy').flatten()
+    # zero_shot_ori = np.load('/home/wuke_2024/ov202503/mmdetection/right_zero_shot_original_scores.npy').flatten()
+    # full_train_bg = np.load('/home/wuke_2024/ov202503/mmdetection/right_full_training_background_similarity.npy').flatten()
+    # full_train_ori = np.load('/home/wuke_2024/ov202503/mmdetection/right_full_training_original_scores.npy').flatten()
+    zero_shot_bg = np.load('/home/wuke_2024/ov202503/mmdetection/zeroshot_supp_savescore/test_epoch_1_background_similarity.npy').flatten()
+    zero_shot_ori = np.load('/home/wuke_2024/ov202503/mmdetection/zeroshot_supp_savescore/test_epoch_1_original_scores.npy').flatten()
+    full_train_bg = np.load('/home/wuke_2024/ov202503/mmdetection/fulltrain_supp_savescore/test_epoch_1_background_similarity.npy').flatten()
+    full_train_ori = np.load('/home/wuke_2024/ov202503/mmdetection/fulltrain_supp_savescore/test_epoch_1_original_scores.npy').flatten()
     # 运行分析
     analyze_score_distributions(zero_shot_bg, zero_shot_ori, full_train_bg, full_train_ori)
