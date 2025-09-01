@@ -338,6 +338,7 @@ class PatchMerging(BaseModule):
             Default: dict(type='LN').
         init_cfg (dict, optional): The extra config for initialization.
             Default: None.
+        prompt_location(str,optional): Prompt location. Default: None.
     """
 
     def __init__(self,
@@ -349,7 +350,9 @@ class PatchMerging(BaseModule):
                  dilation: Optional[Union[int, tuple]] = 1,
                  bias: Optional[bool] = False,
                  norm_cfg: OptConfigType = dict(type='LN'),
-                 init_cfg: OptConfigType = None) -> None:
+                 init_cfg: OptConfigType = None,
+                 prompt_location:Optional[str] = None,
+                 ) -> None:
         super().__init__(init_cfg=init_cfg)
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -389,6 +392,15 @@ class PatchMerging(BaseModule):
 
         self.reduction = nn.Linear(sample_dim, out_channels, bias=bias)
 
+    def upsample_prompt(self, prompt_emb):
+        if self.prompt_upsampling is not None:
+            prompt_emb = self.prompt_upsampling(prompt_emb)
+        else:
+            prompt_emb = torch.cat(
+                (prompt_emb, prompt_emb, prompt_emb, prompt_emb), dim=-1)
+        return prompt_emb
+
+
     def forward(self, x: Tensor,
                 input_size: Tuple[int]) -> Tuple[Tensor, Tuple[int]]:
         """
@@ -411,6 +423,12 @@ class PatchMerging(BaseModule):
                                                  f'but get {input_size}'
 
         H, W = input_size
+        if hasattr(self, 'prompt_location') and self.prompt_location == "prepend":
+            # change input size
+            prompt_emb = x[:, :self.num_prompts, :]
+            x = x[:, self.num_prompts:, :]
+            L = L - self.num_prompts
+            prompt_emb = self.upsample_prompt(prompt_emb)
         assert L == H * W, 'input feature has wrong size'
 
         x = x.view(B, H, W, C).permute([0, 3, 1, 2])  # B, C, H, W
@@ -433,6 +451,11 @@ class PatchMerging(BaseModule):
 
         output_size = (out_h, out_w)
         x = x.transpose(1, 2)  # B, H/2*W/2, 4*C
+        
+        # add the prompt back:
+        if hasattr(self, 'prompt_location') and self.prompt_location == "prepend":
+            x = torch.cat((prompt_emb, x), dim=1)
+
         x = self.norm(x) if self.norm else x
         x = self.reduction(x)
         return x, output_size

@@ -420,6 +420,46 @@ class TokenContrastiveLoss(nn.Module):
 
         return loss
 
+#留给提取原型的gt
+def prepare_gt_info(batch_data_samples, batch_inputs):
+    """
+    预处理GT信息，转换为适合原型特征提取的格式
+    
+    Args:
+        batch_data_samples: 包含GT信息的样本列表
+        batch_inputs: 图像输入张量 [B, C, H, W]
+    
+    Returns:
+        gt_info: 包含相对位置和标签的GT信息字典
+    """
+    B, C, H, W = batch_inputs.shape
+    
+    gt_info = {
+        'bboxes': [],           # 归一化坐标 [B, num_gt, 4]
+        'labels': [],           # 类别标签 [B, num_gt]
+        'num_gt_per_image': []  # 每张图像的GT数量
+    }
+    
+    for i, data_sample in enumerate(batch_data_samples):
+        gt_instances = data_sample.gt_instances
+        
+        # 获取GT bbox和labels
+        bboxes = gt_instances.bboxes  # [num_gt, 4] - [x1, y1, x2, y2]
+        labels = gt_instances.labels  # [num_gt]
+        
+        # 转换为归一化坐标 [0, 1]
+        normalized_bboxes = bboxes.clone()
+        normalized_bboxes[:, [0, 2]] /= W  # x坐标归一化
+        normalized_bboxes[:, [1, 3]] /= H  # y坐标归一化
+        
+        # 存储信息
+        gt_info['bboxes'].append(normalized_bboxes)
+        gt_info['labels'].append(labels)
+        # gt_info['pixel_bboxes'].append(bboxes)
+        # gt_info['image_shapes'].append([H, W])
+        gt_info['num_gt_per_image'].append(len(bboxes))
+     
+    return gt_info
 
 @MODELS.register_module()
 class GroundingDINO(DINO):
@@ -454,6 +494,9 @@ class GroundingDINO(DINO):
                  #shine的参数写在了language_model那里去了
                  use_text_attn_enhance=False,
                  text_attn_enhance_refpath=None,
+                 use_seeker_adapter=False,
+                 use_text_consistency_loss=False,
+                 use_visual_seeker=False, #这个控制是否使用gt
                  *args,
                  use_autocast=False,
                  **kwargs) -> None:
@@ -463,8 +506,10 @@ class GroundingDINO(DINO):
         #text端：
         self.use_coop=use_coop
         self.use_fake_coop = use_fake_coop
+        #TODO:这两个确实还没实现
         self.use_cocoop=use_cocoop
         self.use_maple=use_maple
+
         self.coop_init=coop_init
         self.coop_csc =coop_csc #是否每一类均有不同的上下文参数，仅参考coop原论文
         #coop相关参数
@@ -476,8 +521,9 @@ class GroundingDINO(DINO):
         self.text_contrast = text_contrast
         self.use_text_attn_enhance = use_text_attn_enhance
         self.text_attn_enhance_refpath = text_attn_enhance_refpath
-        #vis端：swin微调参数
+        #vis端：swin微调参数 实际上并没有在这里起作用
         self.use_mona = use_mona
+        # 这里的prompt不是vpt
         self.use_visual_prompt = use_visual_prompt
         self.visual_prompt_size = visual_prompt_size
         self.visual_prompt_clusters = visual_prompt_clusters
@@ -485,10 +531,14 @@ class GroundingDINO(DINO):
         self.visual_prompt_max_ref_points = visual_prompt_max_ref_points
         self.use_random_input_prompt = use_random_input_prompt
         #VL交互：
+        self.use_seeker_adapter = use_seeker_adapter
+        self.use_text_consistency_loss = use_text_consistency_loss
+        self.use_visual_seeker = use_visual_seeker
         self.background_supp = background_supp
         self.background_supp_mode = background_supp_mode
         self.classnames = None #
-
+        #原型测试参数 #TODO
+        
         self.accumulated_background_similarity = []
         self.accumulated_original_scores = []
 
@@ -805,6 +855,64 @@ class GroundingDINO(DINO):
             positive_map_chunked, \
             entities_chunked
 
+    ##为了增加文本特征提前和视觉交互，就重写了这个函数
+    #TODO:第二处注入，需要考虑将gt也注入到swin中间的函数兼容
+    # def extract_feat(self, batch_inputs: Tensor, text_inputs: Tensor = None) -> Tuple[Tensor]:
+    #     """Extract features.
+
+    #     Args:
+    #         batch_inputs (Tensor): Image tensor, has shape (bs, dim, H, W).
+    #         text_inputs (Tensor, optional): Text tensor, has shape (bs, L, D). Defaults to None.
+    #     Returns:
+    #         tuple[Tensor]: Tuple of feature maps from neck. Each feature map
+    #         has shape (bs, dim, H, W).
+    #     """
+    #     if text_inputs is None:
+    #         x = self.backbone(batch_inputs)
+    #     else:
+    #         x = self.backbone(batch_inputs, text_inputs)
+    #     if self.use_text_consistency_loss:
+    #         x, consistency_loss = x
+    #     if self.with_neck:
+    #         x = self.neck(x)
+    #     if self.use_text_consistency_loss:
+    #         return x, consistency_loss
+    #     else:
+    #         return x
+    def extract_feat(self, batch_inputs: Tensor, text_inputs: Tensor = None, gt_info: dict = None) -> Tuple[Tensor]:
+        """Extract features.
+
+        Args:
+            batch_inputs (Tensor): Image tensor, has shape (bs, dim, H, W).
+            text_inputs (Tensor, optional): Text tensor, has shape (bs, L, D). Defaults to None.
+            gt_info (dict, optional): GT information for prototype enhancement. Defaults to None.
+        Returns:
+            tuple[Tensor]: Tuple of feature maps from neck. Each feature map
+            has shape (bs, dim, H, W).
+        """
+        # 根据输入情况调用backbone
+        if text_inputs is None and gt_info is None:
+            # 情况1: 无额外输入，保持原有行为
+            x = self.backbone(batch_inputs)
+        elif text_inputs is not None and gt_info is None:
+            # 情况2: 只输入text_inputs，保持原有行为
+            x = self.backbone(batch_inputs, text_inputs)
+        elif text_inputs is None and gt_info is not None:
+            # 情况3: 只输入gt_info
+            x = self.backbone(batch_inputs, gt_info=gt_info)
+        else:
+            # 情况4: 两者均输入
+            x = self.backbone(batch_inputs, text_inputs, gt_info=gt_info)
+        
+        if self.use_text_consistency_loss:
+            x, consistency_loss = x
+        if self.with_neck:
+            x = self.neck(x)
+        if self.use_text_consistency_loss:
+            return x, consistency_loss
+        else:
+            return x
+
     def forward_transformer(
         self,
         img_feats: Tuple[Tensor],
@@ -814,6 +922,11 @@ class GroundingDINO(DINO):
         #这里是总的
         # The forward procedure of the transformer is defined as:
         # 'pre_transformer' -> 'encoder' -> 'pre_decoder' -> 'decoder'
+        # for name,parameter in self.named_parameters():
+        #     if "lora" in name:
+        #         print(f"layer :  {name}  is  {parameter.requires_grad}")
+        # import sys
+        # sys.exit()
         encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
             img_feats, batch_data_samples)
 
@@ -1126,10 +1239,20 @@ class GroundingDINO(DINO):
             data_samples.text for data_samples in batch_data_samples
         ]
 
+        #TODO:第一处注入，可以考虑将gt_labels，包含bboxes注入到swin中间，方便形成原型，记得确定一下gt_instances的信息格式
+        # >>> gt_instances = InstanceData(metainfo=img_meta)
+        # >>> gt_instances.bboxes = torch.rand((5, 4))
+        # >>> gt_instances.labels = torch.rand((5,))
+
         gt_labels = [
             data_samples.gt_instances.labels
             for data_samples in batch_data_samples
         ]
+        if self.use_visual_seeker:
+            gt_info = prepare_gt_info(batch_data_samples, batch_inputs)
+        else:
+            gt_info = None
+        # import pdb; pdb.set_trace()
         # print('tokens_positive' in batch_data_samples[0]) #False
         # print(text_prompts[0]) #('pedestrian', 'people', 'bicycle', 'car', 'van', 'truck', 'tricycle', 'awning-tricycle', 'bus', 'motor')
         # import sys
@@ -1274,11 +1397,27 @@ class GroundingDINO(DINO):
             data_samples.gt_instances.text_token_mask = \
                 text_token_mask.unsqueeze(0).repeat(
                     len(positive_map), 1)
+        # print(f"self.use_seeker_adapter is {self.use_seeker_adapter}")
+        # print(f"text_dict['embedded'] is {text_dict['embedded']}")
+        # import sys
+        # sys.exit()
         if self.use_autocast:
             with autocast(enabled=True):
-                visual_features = self.extract_feat(batch_inputs)
+                if self.use_seeker_adapter:
+                    if self.use_text_consistency_loss:
+                        visual_features, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info) 
+                    else:
+                        visual_features = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info) 
+                else:
+                    visual_features = self.extract_feat(batch_inputs,gt_info=gt_info)
         else:
-            visual_features = self.extract_feat(batch_inputs)
+            if self.use_seeker_adapter:
+                if self.use_text_consistency_loss:
+                    visual_features, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info)
+                else:
+                    visual_features = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info)
+            else:
+                visual_features = self.extract_feat(batch_inputs,gt_info=gt_info)
         # print("visual_features is",visual_features)
         # print(len(visual_features))
         # # print("visual_features.shape is",visual_features.shape)
@@ -1296,6 +1435,8 @@ class GroundingDINO(DINO):
             **head_inputs_dict, batch_data_samples=batch_data_samples)
         if self.text_contrast and self.training:
             losses['text_contrast_loss'] = text_contrast_loss
+        if self.use_text_consistency_loss:
+            losses['text_consistency_loss'] = consistency_loss
         return losses
 
     def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
@@ -1337,9 +1478,9 @@ class GroundingDINO(DINO):
             ]
         token_positive_maps, text_prompts, _, entities = zip(
             *_positive_maps_and_prompts)
-
+        #Warning:原来预测的时候visual_feats是在这里提取的
         # image feature extraction
-        visual_feats = self.extract_feat(batch_inputs)
+        # visual_feats = self.extract_feat(batch_inputs)
         # print(isinstance(text_prompts[0], list)) #False
         # print(text_prompts[0]) #经典
         # import sys
@@ -1383,7 +1524,13 @@ class GroundingDINO(DINO):
                         sys.exit()
                     concept_ft = self.text_feat_map(concept_ft)
                     text_dict['embedded'] = self.text_attn_enhancer(query=text_dict['embedded'],key=concept_ft,value=concept_ft)
-
+                if self.use_seeker_adapter:
+                    if self.use_text_consistency_loss:
+                        visual_feats, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'])
+                    else:
+                        visual_feats = self.extract_feat(batch_inputs,text_dict['embedded'])
+                else:
+                    visual_feats = self.extract_feat(batch_inputs)
                 batch_data_samples[
                     0].token_positive_map = token_positive_maps_once
 
@@ -1434,7 +1581,13 @@ class GroundingDINO(DINO):
                     sys.exit()
                 concept_ft = self.text_feat_map(concept_ft)
                 text_dict['embedded'] = self.text_attn_enhancer(query=text_dict['embedded'],key=concept_ft,value=concept_ft)
-
+            if self.use_seeker_adapter:
+                if self.use_text_consistency_loss:
+                    visual_feats, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'])
+                else:
+                    visual_feats = self.extract_feat(batch_inputs,text_dict['embedded'])
+            else:
+                visual_feats = self.extract_feat(batch_inputs)
             is_rec_tasks = []
             for i, data_samples in enumerate(batch_data_samples):
                 if token_positive_maps[i] is not None:
@@ -1442,7 +1595,6 @@ class GroundingDINO(DINO):
                 else:
                     is_rec_tasks.append(True)
                 data_samples.token_positive_map = token_positive_maps[i]
-
             head_inputs_dict = self.forward_transformer(
                 visual_feats, text_dict, batch_data_samples)
             results_list = self.bbox_head.predict(
@@ -1471,7 +1623,294 @@ class GroundingDINO(DINO):
                 pred_instances.label_names = label_names
             data_sample.pred_instances = pred_instances
         return batch_data_samples
-            
+    
+    # 仅用于测试FPS，GFLOPS
+    def forward_dummy(self, inputs, data_samples_dict_list):
+        batch_data_samples = dict_list_to_data_samples_list(data_samples_dict_list)
+        rescale = True
+        batch_inputs = inputs
+        if self.use_random_input_prompt:
+            batch_inputs = self.random_input_prompt_tuning(batch_inputs)
+        text_prompts = []
+        enhanced_text_prompts = []
+        tokens_positives = []
+        for data_samples in batch_data_samples:
+            text_prompts.append(data_samples.text)
+            if 'caption_prompt' in data_samples:
+                enhanced_text_prompts.append(data_samples.caption_prompt)
+            else:
+                enhanced_text_prompts.append(None)
+            tokens_positives.append(data_samples.get('tokens_positive', None))
+
+        if 'custom_entities' in batch_data_samples[0]:
+            # Assuming that the `custom_entities` flag
+            # inside a batch is always the same. For single image inference
+            custom_entities = batch_data_samples[0].custom_entities
+        else:
+            custom_entities = False
+        if len(text_prompts) == 1:
+            # All the text prompts are the same,
+            # so there is no need to calculate them multiple times.
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(
+                    text_prompts[0], custom_entities, enhanced_text_prompts[0],
+                    tokens_positives[0])
+            ] * len(batch_inputs)
+        else:
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(text_prompt,
+                                                     custom_entities,
+                                                     enhanced_text_prompt,
+                                                     tokens_positive)
+                for text_prompt, enhanced_text_prompt, tokens_positive in zip(
+                    text_prompts, enhanced_text_prompts, tokens_positives)
+            ]
+        token_positive_maps, text_prompts, _, entities = zip(
+            *_positive_maps_and_prompts)
+
+        # image feature extraction
+        # visual_feats = self.extract_feat(batch_inputs)
+        # print(isinstance(text_prompts[0], list)) #False
+        # print(text_prompts[0]) #经典
+        # import sys
+        # sys.exit()
+        if isinstance(text_prompts[0], list):
+            # chunked text prompts, only bs=1 is supported
+            assert len(batch_inputs) == 1
+            count = 0
+            results_list = []
+
+            entities = [[item for lst in entities[0] for item in lst]]
+
+            for b in range(len(text_prompts[0])):
+                text_prompts_once = [text_prompts[0][b]]
+                token_positive_maps_once = token_positive_maps[0][b]
+                # print(f"text_prompts_once is {text_prompts_once}")
+                # import sys
+                # sys.exit()
+                text_dict = self.language_model(text_prompts_once)
+                # text feature map layer
+                if self.use_fake_coop:
+                    fake_coop = self.fake_coop.repeat(text_dict['embedded'].size()[0], 1, 1)
+                    text_dict['embedded'] = fake_coop+text_dict['embedded']
+                if self.text_feat_map is not None:
+                    text_dict['embedded'] = self.text_feat_map(
+                        text_dict['embedded'])
+                if self.use_text_attn_enhance:
+                    text_bs,_,_ = text_dict['embedded'].shape
+                    concept_ft = torch.load(self.text_attn_enhance_refpath,map_location=text_dict['embedded'].device)
+                    # print(concept_ft)
+                    # print(concept_ft.shape)
+                    # import sys
+                    # sys.exit()
+                    if concept_ft.dim() == 2:
+                        concept_ft = concept_ft.unsqueeze(0).expand(text_bs, -1, -1)
+                    elif concept_ft.dim() == 3:
+                        concept_ft = concept_ft[0].unsqueeze(0).expand(text_bs, -1, -1)
+                    else:
+                        print("error in the text_attn_enhancer shape")
+                        import sys
+                        sys.exit()
+                    concept_ft = self.text_feat_map(concept_ft)
+                    text_dict['embedded'] = self.text_attn_enhancer(query=text_dict['embedded'],key=concept_ft,value=concept_ft)
+                if self.use_seeker_adapter:
+                    if self.use_text_consistency_loss:
+                        visual_feats, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'])
+                    else:
+                        visual_feats = self.extract_feat(batch_inputs,text_dict['embedded'])
+                else:
+                    visual_feats = self.extract_feat(batch_inputs)
+                batch_data_samples[
+                    0].token_positive_map = token_positive_maps_once
+
+                head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                pred_instances = self.bbox_head.predict(
+                    **head_inputs_dict,
+                    rescale=rescale,
+                    batch_data_samples=batch_data_samples)[0]
+
+                if len(pred_instances) > 0:
+                    pred_instances.labels += count
+                count += len(token_positive_maps_once)
+                results_list.append(pred_instances)
+            results_list = [results_list[0].cat(results_list)]
+            is_rec_tasks = [False] * len(results_list)
+        else:
+            #还是走这里的
+            # print(f"text_prompts_once is {text_prompts_once}")
+            # import sys
+            # sys.exit()
+            # extract text feats
+            text_dict = self.language_model(list(text_prompts))
+            # text feature map layer
+            if self.use_fake_coop:
+                # print(f'self.use_fake_coop is {self.use_fake_coop}')
+                # import sys
+                # sys.exit()
+                fake_coop = self.fake_coop.repeat(text_dict['embedded'].size()[0], 1, 1)
+                text_dict['embedded'] = fake_coop+text_dict['embedded']
+            if self.text_feat_map is not None:
+                text_dict['embedded'] = self.text_feat_map(
+                    text_dict['embedded'])
+            if self.use_text_attn_enhance:
+                text_bs,_,_ = text_dict['embedded'].shape
+                concept_ft = torch.load(self.text_attn_enhance_refpath,map_location=text_dict['embedded'].device)
+                # print(concept_ft)
+                # print(concept_ft.shape)
+                # import sys
+                # sys.exit()
+                if concept_ft.dim() == 2:
+                    concept_ft = concept_ft.unsqueeze(0).expand(text_bs, -1, -1)
+                elif concept_ft.dim() == 3:
+                    concept_ft = concept_ft[0].unsqueeze(0).expand(text_bs, -1, -1)
+                else:
+                    print("error in the text_attn_enhancer shape")
+                    import sys
+                    sys.exit()
+                concept_ft = self.text_feat_map(concept_ft)
+                text_dict['embedded'] = self.text_attn_enhancer(query=text_dict['embedded'],key=concept_ft,value=concept_ft)
+            if self.use_seeker_adapter:
+                if self.use_text_consistency_loss:
+                    visual_feats, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'])
+                else:
+                    visual_feats = self.extract_feat(batch_inputs,text_dict['embedded'])
+            else:
+                visual_feats = self.extract_feat(batch_inputs)
+            is_rec_tasks = []
+            for i, data_samples in enumerate(batch_data_samples):
+                if token_positive_maps[i] is not None:
+                    is_rec_tasks.append(False)
+                else:
+                    is_rec_tasks.append(True)
+                data_samples.token_positive_map = token_positive_maps[i]
+            # print("*"*100)
+            # print("pass the text_dict")
+            # print("*"*100)
+            head_inputs_dict = self.forward_transformer(
+                visual_feats, text_dict, batch_data_samples)
+
+            # print("?"*100)
+            # print("pass the forward_transformer")
+            # print("?"*100)
+            results_list = self.bbox_head.predict(
+                **head_inputs_dict,
+                rescale=rescale,
+                batch_data_samples=batch_data_samples)
+            # print("!"*100)
+            # print("pass the bbox_head")
+            # print("!"*100)
+        # for data_sample, pred_instances, entity, is_rec_task in zip(
+        #         batch_data_samples, results_list, entities, is_rec_tasks):
+        #     if len(pred_instances) > 0:
+        #         label_names = []
+        #         for labels in pred_instances.labels:
+        #             if is_rec_task:
+        #                 label_names.append(entity)
+        #                 continue
+        #             if labels >= len(entity):
+        #                 warnings.warn(
+        #                     'The unexpected output indicates an issue with '
+        #                     'named entity recognition. You can try '
+        #                     'setting custom_entities=True and running '
+        #                     'again to see if it helps.')
+        #                 label_names.append('unobject')
+        #             else:
+        #                 label_names.append(entity[labels])
+        #         # for visualization
+        #         pred_instances.label_names = label_names
+        #     data_sample.pred_instances = pred_instances
+        # return data_samples_list_to_dict_list(batch_data_samples)
+        return torch.tensor(0)
+
+from mmdet.structures import DetDataSample
+from mmengine.structures import InstanceData,PixelData
+import torch
+import numpy as np
+
+def data_samples_list_to_dict_list(data_samples):
+    """DetDataSample对象列表转dict列表"""
+    return [datasample_to_dict(ds) for ds in data_samples]
+
+def dict_list_to_data_samples_list(dict_list):
+    """dict列表转DetDataSample对象列表"""
+    return [dict_to_datasample(d) for d in dict_list]
+
+
+def datasample_to_dict(obj):
+    """递归将 DetDataSample/InstanceData/PixelData 转为 dict。"""
+    # DetDataSample
+    if isinstance(obj, DetDataSample):
+        result = {}
+        # meta信息
+        if hasattr(obj, 'metainfo'):
+            result['metainfo'] = dict(obj.metainfo)
+        # data fields
+        for k in obj._data_fields:
+            v = getattr(obj, k)
+            result[k] = datasample_to_dict(v)
+        return result
+    # InstanceData 或 PixelData
+    elif isinstance(obj, (InstanceData, PixelData)):
+        result = {}
+        # meta信息
+        if hasattr(obj, 'metainfo'):
+            result['metainfo'] = dict(obj.metainfo)
+        # data fields
+        for k in obj._data_fields:
+            v = getattr(obj, k)
+            result[k] = datasample_to_dict(v)
+        return result
+    # tensor/ndarray
+    elif isinstance(obj, (torch.Tensor, np.ndarray)):
+        return obj
+    # list/tuple
+    elif isinstance(obj, tuple):
+        return tuple(datasample_to_dict(i) for i in obj)
+    elif isinstance(obj, list):
+        return [datasample_to_dict(i) for i in obj]
+    # dict
+    elif isinstance(obj, dict):
+        return {k: datasample_to_dict(v) for k, v in obj.items()}
+    # 基础类型
+    else:
+        return obj
+
+def dict_to_datasample(d):
+    datasample = DetDataSample()
+    for k, v in d.items():
+        # 处理 metainfo
+        if k == 'metainfo':
+            datasample.set_metainfo(v)
+        # 处理 InstanceData 字段（带下划线和不带下划线都处理）
+        elif k.lstrip('_') in ['gt_instances', 'pred_instances', 'proposals', 'ignored_instances', 'pred_track_instances']:
+            setattr(datasample, k, dict_to_instancedata(v))
+        # 处理 PixelData 字段
+        elif k.lstrip('_') in ['gt_panoptic_seg', 'pred_panoptic_seg', 'gt_sem_seg', 'pred_sem_seg']:
+            setattr(datasample, k, dict_to_pixeldata(v))
+        else:
+            setattr(datasample, k, v)
+    return datasample
+
+def dict_to_instancedata(d):
+    """dict 递归还原为 InstanceData。"""
+    inst = InstanceData()
+    for k, v in d.items():
+        if k == 'metainfo':
+            inst.set_metainfo(v)
+        else:
+            setattr(inst, k, dict_to_datasample(v) if isinstance(v, dict) and not isinstance(v, (torch.Tensor, np.ndarray)) else v)
+    return inst
+
+def dict_to_pixeldata(d):
+    """dict 递归还原为 PixelData。"""
+    pix = PixelData()
+    for k, v in d.items():
+        if k == 'metainfo':
+            pix.set_metainfo(v)
+        else:
+            setattr(pix, k, dict_to_datasample(v) if isinstance(v, dict) and not isinstance(v, (torch.Tensor, np.ndarray)) else v)
+    return pix
 # class CoopPromptLearner(nn.Module):
 #     def __init__(self, cfg, classnames, clip_model):
 #         super().__init__()

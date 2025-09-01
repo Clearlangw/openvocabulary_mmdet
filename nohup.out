@@ -1,0 +1,83 @@
+/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py:178: FutureWarning: The module torch.distributed.launch is deprecated
+and will be removed in future. Use torchrun.
+Note that --use_env is set by default in torchrun.
+If your script expects `--local_rank` argument to be set, please
+change it to read from `os.environ['LOCAL_RANK']` instead. See 
+https://pytorch.org/docs/stable/distributed.html#launch-utility for 
+further instructions
+
+  warnings.warn(
+WARNING:torch.distributed.elastic.agent.server.api:Received 2 death signal, shutting down workers
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 3235 closing signal SIGINT
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap>", line 671, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 843, in exec_module
+  File "<frozen importlib._bootstrap>", line 219, in _call_with_frames_removed
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/optim/functional_adamw.py", line 17, in <module>
+    class _FunctionalAdamW(object):
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/jit/_script.py", line 1323, in script
+    _compile_and_register_class(obj, _rcb, qualified_name)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/jit/_recursive.py", line 44, in _compile_and_register_class
+    script_class = torch._C._jit_script_class_compile(qualified_name, ast, defaults, rcb)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/_jit_internal.py", line 111, in <lambda>
+    return lambda expr: parseExpr(expr, lookup_base)
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "./tools/train.py", line 8, in <module>
+    from mmengine.runner import Runner
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/runner/__init__.py", line 2, in <module>
+    from ._flexible_runner import FlexibleRunner
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/runner/_flexible_runner.py", line 14, in <module>
+    from mmengine._strategy import BaseStrategy
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/_strategy/__init__.py", line 4, in <module>
+    from .base import BaseStrategy
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/_strategy/base.py", line 19, in <module>
+    from mmengine.model.wrappers import is_model_wrapper
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/model/__init__.py", line 6, in <module>
+    from .base_model import BaseDataPreprocessor, BaseModel, ImgDataPreprocessor
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/model/base_model/__init__.py", line 2, in <module>
+    from .base_model import BaseModel
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/model/base_model/base_model.py", line 9, in <module>
+    from mmengine.optim import OptimWrapper
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/optim/__init__.py", line 2, in <module>
+    from .optimizer import (OPTIM_WRAPPER_CONSTRUCTORS, OPTIMIZERS,
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/optim/optimizer/__init__.py", line 10, in <module>
+    from .zero_optimizer import ZeroRedundancyOptimizer
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/optim/optimizer/zero_optimizer.py", line 11, in <module>
+    from torch.distributed.optim import \
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/optim/__init__.py", line 13, in <module>
+    from .functional_adamw import _FunctionalAdamW
+  File "<frozen importlib._bootstrap>", line 991, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 975, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 671, in _load_unlocked
+KeyboardInterrupt
+Traceback (most recent call last):
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/runpy.py", line 194, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py", line 193, in <module>
+    main()
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py", line 189, in main
+    launch(args)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py", line 174, in launch
+    run(args)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/run.py", line 752, in run
+    elastic_launch(
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launcher/api.py", line 131, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launcher/api.py", line 236, in launch_agent
+    result = agent.run()
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/metrics/api.py", line 125, in wrapper
+    result = f(*args, **kwargs)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/agent/server/api.py", line 709, in run
+    result = self._invoke_run(role)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/agent/server/api.py", line 850, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 60, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 2872 got signal: 2
+/home/wuke_2024/anaconda3/bin/python: Error while finding module specification for 'torch.distributed.launch' (ModuleNotFoundError: No module named 'torch')
