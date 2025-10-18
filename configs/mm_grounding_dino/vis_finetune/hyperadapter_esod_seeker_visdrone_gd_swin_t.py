@@ -1,0 +1,130 @@
+_base_ = '../grounding_dino_swin-t_pretrain_obj365.py'
+
+data_root = '/home/wuke_2024/datasets/original_datasets/'
+class_name = ("pedestrian", "people", "bicycle", "car", "van", "truck", "tricycle", "awning-tricycle", "bus", "motor")
+num_classes = len(class_name)
+metainfo = dict(classes=class_name, palette=[(220, 20, 60)])
+
+# model = dict(backbone=dict(
+#         type='SwinTransformer',
+#         embed_dims=96,
+#         depths=[2, 2, 6, 2],
+#         num_heads=[3, 6, 12, 24],
+#         window_size=7,
+#         mlp_ratio=4,
+#         qkv_bias=True,
+#         qk_scale=None,
+#         drop_rate=0.,
+#         attn_drop_rate=0.,
+#         drop_path_rate=0.2,
+#         patch_norm=True,
+#         out_indices=(1, 2, 3),
+#         with_cp=True,
+#         convert_weights=True,
+#         frozen_stages=-1,
+#         init_cfg=dict(type='Pretrained', checkpoint=pretrained),requires_grad=False,finetune_mode='mona'),bbox_head=dict(num_classes=num_classes))
+#控制是否使用seeker类的adaptaer，实际上控制是否有额外信息输入
+dino_use_seeker_adapter = True
+dino_use_visual_seeker=True
+dino_use_esod_loss = True
+model = dict(backbone=dict(requires_grad=False,finetune_mode='hyperadapter_esod_seeker',esod_loss=dino_use_esod_loss),
+             bbox_head=dict(num_classes=num_classes),
+             use_seeker_adapter=dino_use_seeker_adapter,
+             use_visual_seeker=dino_use_visual_seeker, 
+             use_esod_loss=dino_use_esod_loss,
+            )
+train_pipeline = [
+    dict(type='LoadImageFromFile'),
+    dict(type='LoadAnnotations', with_bbox=True),
+    dict(type='RandomFlip', prob=0.5),
+    dict(
+        type='RandomChoice',
+        transforms=[
+            [
+                dict(
+                    type='RandomChoiceResize',
+                    scales=[(480, 1333), (512, 1333), (544, 1333), (576, 1333),
+                            (608, 1333), (640, 1333), (672, 1333), (704, 1333),
+                            (736, 1333), (768, 1333), (800, 1333)],
+                    keep_ratio=True)
+            ],
+            [
+                dict(
+                    type='RandomChoiceResize',
+                    # The radio of all image in train dataset < 7
+                    # follow the original implement
+                    scales=[(400, 4200), (500, 4200), (600, 4200)],
+                    keep_ratio=True),
+                dict(
+                    type='RandomCrop',
+                    crop_type='absolute_range',
+                    crop_size=(384, 600),
+                    allow_negative_crop=True),
+                dict(
+                    type='RandomChoiceResize',
+                    scales=[(480, 1333), (512, 1333), (544, 1333), (576, 1333),
+                            (608, 1333), (640, 1333), (672, 1333), (704, 1333),
+                            (736, 1333), (768, 1333), (800, 1333)],
+                    keep_ratio=True)
+            ]
+        ]),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
+                   'scale_factor', 'flip', 'flip_direction', 'text',
+                   'custom_entities'))
+]
+
+train_dataloader = dict(
+    batch_size=1,
+    num_workers=4,
+    dataset=dict(
+        _delete_=True,
+        type='CocoDataset',
+        data_root=data_root,
+        metainfo=metainfo,
+        return_classes=True,
+        pipeline=train_pipeline,
+        filter_cfg=dict(filter_empty_gt=False, min_size=32),
+        ann_file='train.json',
+        data_prefix=dict(img='VisDrone2019-DET-train/')))
+
+val_dataloader = dict(
+    dataset=dict(
+        metainfo=metainfo,
+        data_root=data_root,
+        ann_file='val.json',
+        data_prefix=dict(img='VisDrone2019-DET-val/')))
+
+test_dataloader = val_dataloader
+
+val_evaluator = dict(ann_file=data_root + 'val.json')
+test_evaluator = val_evaluator
+
+max_epoch = 50
+
+default_hooks = dict(
+    checkpoint=dict(interval=1, max_keep_ckpts=1, save_best='coco/bbox_mAP'),
+    logger=dict(type='LoggerHook', interval=5))
+train_cfg = dict(max_epochs=max_epoch, val_interval=1)
+
+param_scheduler = [
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=max_epoch,
+        by_epoch=True,
+        milestones=[40],
+        gamma=0.1)
+]
+
+optim_wrapper = dict(
+    optimizer=dict(lr=0.0001),
+    paramwise_cfg=dict(
+        custom_keys={
+            'absolute_pos_embed': dict(decay_mult=0.),
+            'backbone': dict(lr_mult=1.0),#为了mona的训练,其余参数仍然冻结
+            'language_model': dict(lr_mult=0.0)
+        }))
+load_from = '/home/wuke_2024/ov202503/mmdetection/grounding_dino_swin-t_pretrain_obj365_goldg_v3det_20231218_095741-e316e297.pth'
+# load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det_20231204_095047-b448804b.pth'  # noqa

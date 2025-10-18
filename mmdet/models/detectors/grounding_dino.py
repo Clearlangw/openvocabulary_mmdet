@@ -497,6 +497,7 @@ class GroundingDINO(DINO):
                  use_seeker_adapter=False,
                  use_text_consistency_loss=False,
                  use_visual_seeker=False, #这个控制是否使用gt
+                 use_esod_loss=False,
                  *args,
                  use_autocast=False,
                  **kwargs) -> None:
@@ -531,9 +532,10 @@ class GroundingDINO(DINO):
         self.visual_prompt_max_ref_points = visual_prompt_max_ref_points
         self.use_random_input_prompt = use_random_input_prompt
         #VL交互：
-        self.use_seeker_adapter = use_seeker_adapter
+        self.use_seeker_adapter = use_seeker_adapter #控制是否使用seeker类的adaptaer，实际上控制是否有额外信息输入
         self.use_text_consistency_loss = use_text_consistency_loss
-        self.use_visual_seeker = use_visual_seeker
+        self.use_visual_seeker = use_visual_seeker #控制是否需要使用gt
+        self.use_esod_loss = use_esod_loss
         self.background_supp = background_supp
         self.background_supp_mode = background_supp_mode
         self.classnames = None #
@@ -906,10 +908,14 @@ class GroundingDINO(DINO):
         
         if self.use_text_consistency_loss:
             x, consistency_loss = x
+        if self.use_esod_loss and gt_info is not None:
+            x, seg_loss = x
         if self.with_neck:
             x = self.neck(x)
         if self.use_text_consistency_loss:
             return x, consistency_loss
+        if self.use_esod_loss and gt_info is not None:
+            return x, seg_loss
         else:
             return x
 
@@ -1406,6 +1412,8 @@ class GroundingDINO(DINO):
                 if self.use_seeker_adapter:
                     if self.use_text_consistency_loss:
                         visual_features, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info) 
+                    elif self.use_esod_loss:
+                        visual_features, seg_loss = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info)
                     else:
                         visual_features = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info) 
                 else:
@@ -1414,6 +1422,8 @@ class GroundingDINO(DINO):
             if self.use_seeker_adapter:
                 if self.use_text_consistency_loss:
                     visual_features, consistency_loss = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info)
+                elif self.use_esod_loss:
+                    visual_features, seg_loss = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info)
                 else:
                     visual_features = self.extract_feat(batch_inputs,text_dict['embedded'],gt_info=gt_info)
             else:
@@ -1437,6 +1447,8 @@ class GroundingDINO(DINO):
             losses['text_contrast_loss'] = text_contrast_loss
         if self.use_text_consistency_loss:
             losses['text_consistency_loss'] = consistency_loss
+        if self.use_esod_loss:
+            losses['esod_loss'] = seg_loss
         return losses
 
     def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):

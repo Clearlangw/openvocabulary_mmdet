@@ -401,6 +401,8 @@ class SwinBlock(BaseModule):
         prompt_location (str, optional): Prompt location. Default: None.
         text_dim (int, optional): Text dimension. Default: 256.
         text_consistency_loss (bool): Whether to use text consistency loss. Default: False.
+        tokens_of_interest (list): 用于obj_seeker的tokens_of_interest. Default: None.
+        esod_loss (bool): 是否使用ESOD损失,用于obj_seeker. Default: False.
     """
 
     def __init__(self,
@@ -424,19 +426,25 @@ class SwinBlock(BaseModule):
                  prompt_location=None,
                  text_dim=256,
                  text_consistency_loss=False,
-                 tokens_of_interest=None):
+                 tokens_of_interest=None,
+                 esod_loss=False,
+                 ):
 
         super(SwinBlock, self).__init__()
 
         self.init_cfg = init_cfg
         self.with_cp = with_cp
         self.text_consistency_loss = text_consistency_loss
+        self.esod_loss = esod_loss
         lora_mode = False
         if finetune_mode == 'lora':
             lora_mode = True
         adapter_mode = False
         if finetune_mode == 'adapter':
             adapter_mode = True
+        # hyper_mode = False
+        # if finetune_mode == 'hyperadapter':
+        #     hyper_mode = True
         self.norm1 = build_norm_layer(norm_cfg, embed_dims)[1]
         self.attn = ShiftWindowMSA(
             embed_dims=embed_dims,
@@ -501,11 +509,35 @@ class SwinBlock(BaseModule):
             for name, param in self.named_parameters():
                 if 'seeker_module' not in name:
                     param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'query_seeker':
+            self.query_seeker_module1 = QuerySeekerAdapter(embed_dims,text_dim)
+            self.query_seeker_module2 = QuerySeekerAdapter(embed_dims,text_dim)
+            for name, param in self.named_parameters():
+                if 'query_seeker_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'esod_query_seeker':
+            self.esod_query_seeker_module1 = ESODQuerySeekerAdapter(embed_dims,text_dim)
+            self.esod_query_seeker_module2 = ESODQuerySeekerAdapter(embed_dims,text_dim)
+            for name, param in self.named_parameters():
+                if 'esod_query_seeker_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'obj_seeker': #来自ESOD的有gt的模块
+            self.obj_seeker_module1 = ObjSeeker(embed_dims)
+            self.obj_seeker_module2 = ObjSeeker(embed_dims)
+            for name, param in self.named_parameters():
+                if 'obj_seeker_module' not in name:
+                    param.requires_grad = self.requires_grad
         elif self.finetune_mode == 'visual_seeker':
             self.visual_seeker_module1 = VisualSeekerAdapter(embed_dims)
             self.visual_seeker_module2 = VisualSeekerAdapter(embed_dims)
             for name, param in self.named_parameters():
                 if 'visual_seeker_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'classaware_visual_seeker':
+            self.classaware_visual_seeker_module1 = ClassawareVisualSeekerAdapter(embed_dims)
+            self.classaware_visual_seeker_module2 = ClassawareVisualSeekerAdapter(embed_dims)
+            for name, param in self.named_parameters():
+                if 'classaware_visual_seeker_module' not in name:
                     param.requires_grad = self.requires_grad
         elif self.finetune_mode == 'omni_seeker':
             self.omni_seeker_module1 = OmniDynamicSeekerAdapter(embed_dims,text_dim)
@@ -513,6 +545,38 @@ class SwinBlock(BaseModule):
             for name, param in self.named_parameters():
                 if 'omni_seeker_module' not in name:
                     param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'hyperadapter':
+            self.hyperadapter_module1 = HyperAdapter(embed_dims)
+            self.hyperadapter_module2 = HyperAdapter(embed_dims)
+            for name, param in self.named_parameters():
+                if 'hyperadapter_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'hyperadapter_vl':
+            # 不开文本损失，只开文本输入
+            self.hyperadapter_vl_module1 = HyperAdapterVL(embed_dims)
+            self.hyperadapter_vl_module2 = HyperAdapterVL(embed_dims)
+            for name, param in self.named_parameters():
+                if 'hyperadapter_vl_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'hyperadapter_esod_seeker':
+            self.hyperadapter_esod_seeker_module1 = HyperAdapterESODSeeker(embed_dims)
+            self.hyperadapter_esod_seeker_module2 = HyperAdapterESODSeeker(embed_dims)
+            for name, param in self.named_parameters():
+                if 'hyperadapter_esod_seeker_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'hyperadapter_multi':
+            self.hyperadapter_multi_module1 = HyperAdapterMulti(embed_dims)
+            self.hyperadapter_multi_module2 = HyperAdapterMulti(embed_dims)
+            for name, param in self.named_parameters():
+                if 'hyperadapter_multi_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'hyperadapter_mona':
+            self.hyperadapter_mona_module1 = HyperAdapterMona(embed_dims)
+            self.hyperadapter_mona_module2 = HyperAdapterMona(embed_dims)
+            for name, param in self.named_parameters():
+                if 'hyperadapter_mona_module' not in name:
+                    param.requires_grad = self.requires_grad
+
         elif self.finetune_mode == 'adapter':
             for name, param in self.named_parameters():
                 if 'adapter' not in name:
@@ -547,9 +611,9 @@ class SwinBlock(BaseModule):
                     param.requires_grad = self.requires_grad
         ##其他模式则不变
 
-    def forward(self, x, hw_shape,text_features=None,gt_info=None):
+    def forward(self, x, hw_shape,text_features=None,gt_info=None, hyper_generator=None):
 
-        def _inner_forward(x,text_features=None,gt_info=None):
+        def _inner_forward(x,text_features=None,gt_info=None,hyper_generator=None):
             identity = x
             x = self.norm1(x)
             x = self.attn(x, hw_shape)
@@ -565,10 +629,36 @@ class SwinBlock(BaseModule):
                 x = self.seeker_module1(x, hw_shape, text_features=text_features)
                 if isinstance(x, tuple):
                     x, consistency_loss_1 = x
+            elif self.finetune_mode == 'query_seeker':
+                x = self.query_seeker_module1(x, hw_shape, text_features=text_features)
+                if isinstance(x, tuple):
+                    x, aux_loss_1 = x
+            elif self.finetune_mode == 'esod_query_seeker':
+                x = self.esod_query_seeker_module1(x, hw_shape, text_features=text_features,gt_info=gt_info)
+                if isinstance(x, tuple):
+                    x, aux_loss_1 = x
+            elif self.finetune_mode == 'obj_seeker': #来自ESOD的有gt的模块
+                x = self.obj_seeker_module1(x,hw_shape,gt_info=gt_info)
+                if isinstance(x, tuple):
+                    x, seg_loss_1 = x
             elif self.finetune_mode == 'visual_seeker':
                 x = self.visual_seeker_module1(x, hw_shape, gt_info=gt_info)
+            elif self.finetune_mode == 'classaware_visual_seeker':
+                x = self.classaware_visual_seeker_module1(x, hw_shape, gt_info=gt_info)
             elif self.finetune_mode == 'omni_seeker':
                 x = self.omni_seeker_module1(x, hw_shape, text_features=text_features)
+            elif self.finetune_mode == 'hyperadapter':
+                x = self.hyperadapter_module1(x, hyper_generator, hw_shape)
+            elif self.finetune_mode == 'hyperadapter_vl':
+                x = self.hyperadapter_vl_module1(x, hyper_generator, hw_shape, text_features=text_features)
+            elif self.finetune_mode == 'hyperadapter_esod_seeker':
+                x = self.hyperadapter_esod_seeker_module1(x, hyper_generator, hw_shape, gt_info=gt_info)
+                if isinstance(x, tuple):
+                    x, seg_loss_1 = x
+            elif self.finetune_mode == 'hyperadapter_multi':
+                x = self.hyperadapter_multi_module1(x, hyper_generator, hw_shape)
+            elif self.finetune_mode == 'hyperadapter_mona':
+                x = self.hyperadapter_mona_module1(x, hyper_generator, hw_shape)
             # elif self.finetune_mode == 'adapter':
             #     x = self.adapter_module1(x) #mona原论文里面的adapter位置和这里不一致
 
@@ -587,25 +677,56 @@ class SwinBlock(BaseModule):
                 x = self.seeker_module2(x, hw_shape,text_features=text_features)
                 if isinstance(x, tuple):
                     x, consistency_loss_2 = x
+            elif self.finetune_mode == 'query_seeker':
+                x = self.query_seeker_module2(x, hw_shape, text_features=text_features)
+            elif self.finetune_mode == 'esod_query_seeker':
+                x = self.esod_query_seeker_module2(x, hw_shape, text_features=text_features,gt_info=gt_info)
+                if isinstance(x, tuple):
+                    x, aux_loss_2 = x
+            elif self.finetune_mode == 'obj_seeker': #来自ESOD的有gt的模块
+                x = self.obj_seeker_module2(x, hw_shape, gt_info=gt_info)
+                if isinstance(x, tuple):
+                    x, seg_loss_2 = x
             elif self.finetune_mode == 'visual_seeker':
                 x = self.visual_seeker_module2(x, hw_shape, gt_info=gt_info)
+            elif self.finetune_mode == 'classaware_visual_seeker':
+                x = self.classaware_visual_seeker_module2(x, hw_shape, gt_info=gt_info)
             elif self.finetune_mode == 'omni_seeker':
                 x = self.omni_seeker_module2(x, hw_shape,text_features=text_features)
+            elif self.finetune_mode == 'hyperadapter':
+                x = self.hyperadapter_module2(x, hyper_generator, hw_shape)
+            elif self.finetune_mode == 'hyperadapter_vl':
+                x = self.hyperadapter_vl_module2(x, hyper_generator, hw_shape, text_features=text_features)
+            elif self.finetune_mode == 'hyperadapter_esod_seeker':
+                x = self.hyperadapter_esod_seeker_module2(x, hyper_generator, hw_shape, gt_info=gt_info)
+                if isinstance(x, tuple):
+                    x, seg_loss_2 = x
+            elif self.finetune_mode == 'hyperadapter_multi':
+                x = self.hyperadapter_multi_module2(x, hyper_generator, hw_shape)
+            elif self.finetune_mode == 'hyperadapter_mona':
+                x = self.hyperadapter_mona_module2(x, hyper_generator, hw_shape)
             # elif self.finetune_mode == 'adapter':
             #     x = self.adapter_module2(x)
 
             elif self.finetune_mode == 'adapter_former':
                 x = x+adapt_x
 
-            if self.text_consistency_loss:
+            if self.text_consistency_loss and self.finetune_mode == 'seeker':
                 return (x, consistency_loss_1+consistency_loss_2)
+            elif self.text_consistency_loss and self.finetune_mode == 'query_seeker':
+                return (x, aux_loss_1+aux_loss_2)
+            elif self.text_consistency_loss and self.finetune_mode == 'esod_query_seeker':
+                return (x, aux_loss_1+aux_loss_2)
+            elif self.esod_loss and gt_info is not None:
+                return (x,seg_loss_1+seg_loss_2)
             else:
                 return x
 
-        if self.with_cp and x.requires_grad:
-            x = cp.checkpoint(_inner_forward,x,text_features,gt_info)#这里不太确定喵
+        # 当共享的 hyper_generator 参与计算图时，避免使用 reentrant checkpoint 以防 DDP 冲突
+        if self.with_cp and x.requires_grad and hyper_generator is None:
+            x = cp.checkpoint(_inner_forward, x, text_features, gt_info)
         else:
-            x = _inner_forward(x,text_features,gt_info)
+            x = _inner_forward(x,text_features,gt_info,hyper_generator)
 
         return x
 
@@ -643,6 +764,8 @@ class SwinBlockSequence(BaseModule):
             Default: None.
         text_dim (int, optional): Text dimension. Default: 256.
         text_consistency_loss (bool): Whether to use text consistency loss. Default: False.
+        tokens_of_interest (list): 用于obj_seeker的tokens_of_interest. Default: None.
+        esod_loss (bool): 是否使用ESOD损失,用于obj_seeker. Default: False.
     """
 
     def __init__(self,
@@ -669,6 +792,9 @@ class SwinBlockSequence(BaseModule):
                  text_dim=256,
                  text_consistency_loss=False,
                  tokens_of_interest=None,
+                 esod_loss=False,
+                 stage_index=0,
+                 adapter_stages=None,
                  ):
         super().__init__(init_cfg=init_cfg)
 
@@ -680,6 +806,9 @@ class SwinBlockSequence(BaseModule):
 
         self.blocks = ModuleList()
         self.text_consistency_loss = text_consistency_loss
+        self.esod_loss = esod_loss
+        self.stage_index = stage_index
+        self.adapter_stages = adapter_stages
         #vpt参数
         self.deep_prompt = deep_prompt
         self.num_prompts = num_prompts
@@ -688,6 +817,15 @@ class SwinBlockSequence(BaseModule):
             raise ValueError("deep prompt mode for swin is only applicable to prepend")
         
         for i in range(depth):
+            # 决定当前stage是否使用adapter
+            use_adapter_in_stage = False
+            if adapter_stages is not None:
+                # 如果指定了adapter_stages，则只在指定的stage使用adapter
+                use_adapter_in_stage = (stage_index in adapter_stages)
+            else:
+                # 如果没有指定adapter_stages，则根据finetune_mode决定
+                use_adapter_in_stage = (finetune_mode is not None)
+            
             block = SwinBlock(
                 embed_dims=embed_dims,
                 num_heads=num_heads,
@@ -704,12 +842,14 @@ class SwinBlockSequence(BaseModule):
                 with_cp=with_cp,
                 init_cfg=None,
                 requires_grad=requires_grad,
-                finetune_mode=finetune_mode,
+                finetune_mode=finetune_mode if use_adapter_in_stage else None,
                 num_prompts=num_prompts,
                 prompt_location=prompt_location,
                 text_dim=text_dim,
                 text_consistency_loss=text_consistency_loss,
-                tokens_of_interest=tokens_of_interest)
+                tokens_of_interest=tokens_of_interest,
+                esod_loss =  esod_loss,
+                )
             self.blocks.append(block)
 
         # self.downsample = downsample
@@ -732,36 +872,47 @@ class SwinBlockSequence(BaseModule):
             self.downsample = None
     
     #TODO:这里得改新的forward了
-    def forward(self, x, hw_shape,text_features=None,deep_prompt=None,gt_info=None):
+    def forward(self, x, hw_shape,text_features=None,deep_prompt=None,gt_info=None, hyper_generator=None):
         if self.deep_prompt:
             assert deep_prompt is not None
             return self.forward_deep(x, hw_shape, text_features,deep_prompt,gt_info)
         if self.text_consistency_loss:
             consistency_loss = torch.zeros(1, device=x.device)
+        elif self.esod_loss and gt_info is not None:
+            seg_loss = torch.zeros(1, device=x.device)
         for block in self.blocks:
-            x = block(x, hw_shape,text_features,gt_info)
+            x = block(x, hw_shape,text_features,gt_info, hyper_generator=hyper_generator)
             if isinstance(x, tuple) and self.text_consistency_loss:
                 x, consistency_loss_i = x
                 consistency_loss += consistency_loss_i
+            elif isinstance(x, tuple) and self.esod_loss and gt_info is not None:
+                x,seg_loss_i = x
+                seg_loss += seg_loss_i
         if self.downsample:
             x_down, down_hw_shape = self.downsample(x, hw_shape)
             if self.text_consistency_loss:
                 return x_down, down_hw_shape, x, hw_shape, consistency_loss
+            elif self.esod_loss and gt_info is not None:
+                return x_down, down_hw_shape, x, hw_shape, seg_loss
             else:
                 return x_down, down_hw_shape, x, hw_shape
         else:
             if self.text_consistency_loss:
                 return x, hw_shape, x, hw_shape, consistency_loss
+            elif self.esod_loss and gt_info is not None:
+                return x, hw_shape, x, hw_shape, seg_loss
             else:
                 return x, hw_shape, x, hw_shape
 
-    def forward_deep(self, x, hw_shape,text_features=None,deep_prompt=None,gt_info=None):
+    def forward_deep(self, x, hw_shape,text_features=None,deep_prompt=None,gt_info=None, hyper_generator=None):
         # forwards for deep prompt
         assert self.deep_prompt
         # only support prepend
         assert self.prompt_location == "prepend"
         if self.text_consistency_loss:
             consistency_loss = torch.zeros(1, device=x.device)
+        elif self.esod_loss and gt_info is not None:
+            seg_loss = torch.zeros(1, device=x.device)
         # add the prompt embed before each blk call
         B = x.shape[0]  # batchsize
         num_blocks = len(self.blocks)
@@ -770,7 +921,7 @@ class SwinBlockSequence(BaseModule):
             #Swin的第一个stage的deep prompt数量是depths[0] - 1，而不是num_blocks（因为第一个block用shallow prompt，后续每个block前插入deep prompt）
             for i in range(num_blocks):
                 if i == 0:
-                    x = self.blocks[i](x, hw_shape,text_features,gt_info)
+                    x = self.blocks[i](x, hw_shape,text_features,gt_info, hyper_generator=hyper_generator)
 
                 else:
                     prompt_emb = deep_prompt[i - 1].expand(B, -1, -1)
@@ -778,10 +929,13 @@ class SwinBlockSequence(BaseModule):
                         (prompt_emb, x[:, self.num_prompts:, :]),
                         dim=1
                     )
-                    x = self.blocks[i](x, hw_shape,text_features,gt_info)
+                    x = self.blocks[i](x, hw_shape,text_features,gt_info, hyper_generator=hyper_generator)
                     if isinstance(x, tuple) and self.text_consistency_loss:
                         x, consistency_loss_i = x
                         consistency_loss += consistency_loss_i
+                    elif isinstance(x, tuple) and self.esod_loss and gt_info is not None:
+                        x,seg_loss_i = x
+                        seg_loss += seg_loss_i
         else:
             # other layers
             for i in range(num_blocks):
@@ -790,19 +944,26 @@ class SwinBlockSequence(BaseModule):
                     (prompt_emb, x[:, self.num_prompts:, :]),
                     dim=1
                 )
-                x = self.blocks[i](x, hw_shape,text_features,gt_info)
+                x = self.blocks[i](x, hw_shape,text_features,gt_info, hyper_generator=hyper_generator)
                 if isinstance(x, tuple) and self.text_consistency_loss:
                     x, consistency_loss_i = x
                     consistency_loss += consistency_loss_i
+                elif isinstance(x, tuple) and self.esod_loss and gt_info is not None:
+                    x,seg_loss_i = x
+                    seg_loss += seg_loss_i
         if self.downsample:
             x_down, down_hw_shape = self.downsample(x, hw_shape)
             if self.text_consistency_loss:
                 return x_down, down_hw_shape, x, hw_shape, consistency_loss
+            elif self.esod_loss and gt_info is not None:
+                return x_down, down_hw_shape, x, hw_shape, seg_loss
             else:
                 return x_down, down_hw_shape, x, hw_shape
         else:
             if self.text_consistency_loss:
                 return x, hw_shape, x, hw_shape, consistency_loss
+            elif self.esod_loss and gt_info is not None:
+                return x, hw_shape, x, hw_shape, seg_loss
             else:
                 return x, hw_shape, x, hw_shape
 
@@ -869,141 +1030,6 @@ class MonaOp(nn.Module):
         return identity + x
 
 
-class ODConvAttention(nn.Module):
-    def __init__(self, in_planes, out_planes, kernel_size, groups=1, reduction=0.0625, kernel_num=4, min_channel=16):
-        super(ODConvAttention, self).__init__()
-        attention_channel = max(int(in_planes * reduction), min_channel)
-        self.kernel_size = kernel_size
-        self.kernel_num = kernel_num
-        self.temperature = 1.0
-
-        self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Conv2d(in_planes, attention_channel, 1, bias=False)
-        self.norm = nn.GroupNorm(1, attention_channel)
-        self.relu = nn.ReLU(inplace=True)
-
-        self.channel_fc = nn.Conv2d(attention_channel, in_planes, 1, bias=True)
-        self.func_channel = self.get_channel_attention
-
-        if in_planes == groups and in_planes == out_planes:  # depth-wise convolution
-            self.func_filter = self.skip
-        else:
-            self.filter_fc = nn.Conv2d(attention_channel, out_planes, 1, bias=True)
-            self.func_filter = self.get_filter_attention
-
-        if kernel_size == 1:  # point-wise convolution
-            self.func_spatial = self.skip
-        else:
-            self.spatial_fc = nn.Conv2d(attention_channel, kernel_size * kernel_size, 1, bias=True)
-            self.func_spatial = self.get_spatial_attention
-
-        if kernel_num == 1:
-            self.func_kernel = self.skip
-        else:
-            self.kernel_fc = nn.Conv2d(attention_channel, kernel_num, 1, bias=True)
-            self.func_kernel = self.get_kernel_attention
-
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            if isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def update_temperature(self, temperature):
-        self.temperature = temperature
-
-    @staticmethod
-    def skip(_):
-        return 1.0
-
-    def get_channel_attention(self, x):
-        channel_attention = torch.sigmoid(self.channel_fc(x).view(x.size(0), -1, 1, 1) / self.temperature)
-        return channel_attention
-
-    def get_filter_attention(self, x):
-        filter_attention = torch.sigmoid(self.filter_fc(x).view(x.size(0), -1, 1, 1) / self.temperature)
-        return filter_attention
-
-    def get_spatial_attention(self, x):
-        spatial_attention = self.spatial_fc(x).view(x.size(0), 1, 1, 1, self.kernel_size, self.kernel_size)
-        spatial_attention = torch.sigmoid(spatial_attention / self.temperature)
-        return spatial_attention
-
-    def get_kernel_attention(self, x):
-        kernel_attention = self.kernel_fc(x).view(x.size(0), -1, 1, 1, 1, 1)
-        kernel_attention = F.softmax(kernel_attention / self.temperature, dim=1)
-        return kernel_attention
-
-    def forward(self, x):
-        x = self.avgpool(x)
-        x = self.fc(x)
-        x = self.norm(x)
-        x = self.relu(x)
-        return self.func_channel(x), self.func_filter(x), self.func_spatial(x), self.func_kernel(x)
-
-
-class ODConv2d(nn.Module):
-    """ kernel_size = 1 or 3 """
-    def __init__(self, in_planes, out_planes, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
-                 reduction=0.0625, kernel_num=4):
-        super(ODConv2d, self).__init__()
-        self.in_planes = in_planes
-        self.out_planes = out_planes
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.dilation = dilation
-        self.groups = groups
-        self.kernel_num = kernel_num
-        self.attention = ODConvAttention(in_planes, out_planes, kernel_size, groups=groups,
-                                   reduction=reduction, kernel_num=kernel_num)
-        self.weight = nn.Parameter(torch.randn(kernel_num, out_planes, in_planes//groups, kernel_size, kernel_size),
-                                   requires_grad=True)
-        self._initialize_weights()
-
-        if self.kernel_size == 1 and self.kernel_num == 1:
-            self._forward_impl = self._forward_impl_pw1x
-        else:
-            self._forward_impl = self._forward_impl_common
-
-    def _initialize_weights(self):
-        for i in range(self.kernel_num):
-            nn.init.kaiming_normal_(self.weight[i], mode='fan_out', nonlinearity='relu')
-
-    def update_temperature(self, temperature):
-        self.attention.update_temperature(temperature)
-
-    def _forward_impl_common(self, x):
-        channel_attention, filter_attention, spatial_attention, kernel_attention = self.attention(x)
-        batch_size, in_planes, height, width = x.size()
-        x = x * channel_attention
-        x = x.reshape(1, -1, height, width)
-        aggregate_weight = spatial_attention * kernel_attention * self.weight.unsqueeze(dim=0)
-        aggregate_weight = torch.sum(aggregate_weight, dim=1).view(
-            [-1, self.in_planes // self.groups, self.kernel_size, self.kernel_size])
-        output = F.conv2d(x, weight=aggregate_weight, bias=None, stride=self.stride, padding=self.padding,
-                          dilation=self.dilation, groups=self.groups * batch_size)
-        output = output.view(batch_size, self.out_planes, output.size(-2), output.size(-1))
-        output = output * filter_attention
-        return output
-
-    def _forward_impl_pw1x(self, x):
-        channel_attention, filter_attention, spatial_attention, kernel_attention = self.attention(x)
-        x = x * channel_attention
-        output = F.conv2d(x, weight=self.weight.squeeze(dim=0), bias=None, stride=self.stride, padding=self.padding,
-                          dilation=self.dilation, groups=self.groups)
-        output = output * filter_attention
-        return output
-
-    def forward(self, x):
-        return self._forward_impl(x)
-
 class Mona(BaseModule):
     def __init__(self,
                  in_dim,
@@ -1039,80 +1065,6 @@ class Mona(BaseModule):
         project2 = self.project2(nonlinear)
 
         return identity + project2
-
-
-class ODMona(BaseModule):
-    def __init__(self,
-                 in_dim,
-                 factor=4):
-        super().__init__()
-
-        self.project1 = nn.Linear(in_dim, 64)
-        self.nonlinear = F.gelu
-        self.project2 = nn.Linear(64, in_dim)
-
-        self.dropout = nn.Dropout(p=0.1)
-
-        self.adapter_conv = ODConv2d(64, 64, kernel_size=3, stride=1, padding=1, groups=4, reduction=0.0625, kernel_num=3)
-
-        self.norm = nn.LayerNorm(in_dim)
-        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
-        self.gammax = nn.Parameter(torch.ones(in_dim))
-
-    def forward(self, x, hw_shapes=None):
-        identity = x
-        x = self.norm(x) * self.gamma + x * self.gammax
-
-        project1 = self.project1(x)
-
-        b, n, c = project1.shape
-        h, w = hw_shapes
-        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
-        project1 = self.adapter_conv(project1)
-        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
-
-        nonlinear = self.nonlinear(project1)
-        nonlinear = self.dropout(nonlinear)
-        project2 = self.project2(nonlinear)
-
-        return identity + project2
-
-class Simple_Mona(BaseModule):
-    def __init__(self,
-                 in_dim,
-                 factor=4):
-        super().__init__()
-
-        # self.project1 = nn.Linear(in_dim, 64)
-        # self.nonlinear = F.gelu
-        # self.project2 = nn.Linear(64, in_dim)
-
-        # self.dropout = nn.Dropout(p=0.1)
-
-        # self.adapter_conv = MonaOp(64)
-
-        self.norm = nn.LayerNorm(in_dim)
-        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
-        self.gammax = nn.Parameter(torch.ones(in_dim))
-
-    def forward(self, x, hw_shapes=None):
-        # identity = x
-
-        x = self.norm(x) * self.gamma + x * self.gammax
-        return x 
-        # project1 = self.project1(x)
-
-        # b, n, c = project1.shape
-        # h, w = hw_shapes
-        # project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
-        # project1 = self.adapter_conv(project1)
-        # project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
-
-        # nonlinear = self.nonlinear(project1)
-        # nonlinear = self.dropout(nonlinear)
-        # project2 = self.project2(nonlinear)
-
-        # return identity + project2
 
 #gt转为同层的gt
 def get_feature_positions(gt_info, hw_shape):
@@ -1169,6 +1121,234 @@ def feature_consistency_loss(vision_feat, text_feat):
         F.normalize(vision_feat.mean(dim=1), p=2, dim=-1),
         F.normalize(text_feat.squeeze(1), p=2, dim=-1)
     )
+import numpy as np
+## 以下代码来自esod部分的设计，先做一个Objseeker，然后再尝试在这个基础上做一个ObjSeekerEnhancer
+class ObjSeeker(nn.Module):
+    def __init__(self,
+                 in_dim,
+                 down_project_dim=64,#降维维度
+                 dropout_rate=0.1,
+                 ):
+        super().__init__()
+        
+        self.in_dim = in_dim
+        self.projected_dim = down_project_dim
+        # --- 核心 Adapter 结构 ---
+        # 1. 降维
+        self.down_project = nn.Linear(in_dim, down_project_dim)
+        # 2. 非线性激活与 Dropout (紧跟降维之后)
+        self.nonlinear_activation = F.gelu
+        self.dropout = nn.Dropout(dropout_rate)
+
+        self.dwconv = DWConvForObjSeeker(down_project_dim, down_project_dim, kernel_size=13, stride=1)
+        self.heatmap_conv = Segmenter(nc=1,ch=down_project_dim)
+        # 3. 升维
+        self.up_project = nn.Linear(down_project_dim, in_dim)
+        self.gamma = nn.Parameter(torch.tensor(1e-1))
+
+    def forward(self, x, hw_shapes=None, gt_info=None):
+        identity = x
+        if gt_info is not None:
+            mask,weight = gen_adapter_mask(gt_info,hw_shapes)
+        x = self.down_project(x)
+        pred = self.nonlinear_activation(x)
+        x = self.dropout(pred)
+        
+        b, n, c = pred.shape
+        h, w = hw_shapes
+        pred = pred.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        # = pred.permute(0, 2, 3, 1).reshape(b, n, c)
+        pred = self.dwconv(pred)
+        pred = self.heatmap_conv(pred)
+
+        x = self.up_project(x)
+        if gt_info is not None:
+            loss_seg = compute_loss_seg(pred,mask,weight)
+            return identity+x*self.gamma,loss_seg*0.1
+        else:
+            return identity+x*self.gamma
+        #目前根据返回的是不是tuple判断是不是训练状态
+
+
+##bbox转高斯mask
+def gaussian2D(shape, sigma=1., thresh=None):
+    #import pdb;pdb.set_trace()
+    m, n = [(ss - 1.) / 2. for ss in shape]
+    # print(f'm is {m},type is {type(m)}')
+    # print(f'n is {n},type is {type(n)}')
+    y, x = np.ogrid[-m:m + 1, -n:n + 1]
+    
+    epsilon = 1e-9
+    if thresh is None and sigma is not None:
+        h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
+        h[h < np.finfo(h.dtype).eps * h.max()] = 0
+    elif thresh is not None and sigma is None:
+        thresh += 1e-6
+        var1 = n ** 2 / math.log(thresh) + epsilon
+        var2 = m ** 2 / math.log(thresh) + epsilon
+        h = np.exp(x * x / var1 + y * y / var2)
+        h *= 1. / h.max()  # in case even number
+        # h += (h - thresh) * (1. - h.max()) / (h.max() - thresh)
+        h[h < thresh] = 0.0
+    else:
+        raise ValueError('invalid gaussian2D parameters')
+    
+    return h
+
+def gen_adapter_mask(gt_info, hw_shape, thresh=0.5):
+    """
+    为adapter生成mask，参考get_feature_positions的坐标转换逻辑
+    
+    Args:
+        gt_info: GT信息字典，包含bboxes, labels, num_gt_per_image
+        hw_shape: 特征图尺寸 (H, W)
+        thresh: 高斯阈值，默认0.5
+    
+    Returns:
+        mask: 生成的mask [H, W]
+        weight: 对应的权重 [H, W]
+    """
+    # 默认启用cls_ratio
+    cls_ratio = [1.83, 5.35, 13.82, 1.00, 5.80, 11.25, 30.11, 44.63, 24.45, 4.89]  # train set
+    
+    H, W = hw_shape
+    B = len(gt_info['bboxes'])  # batch size
+    
+    # 初始化mask和weight [B, H, W]
+    mask = np.zeros((B, H, W), dtype=np.float32)
+    weight = np.ones((B, H, W), dtype=np.float32)
+    
+    # 获取GT在特征图上的位置
+    feature_positions = get_feature_positions(gt_info, hw_shape)
+    # print(f'feature_positions: {feature_positions}')
+    # print(f'gt_info: {gt_info}')
+    # print(f'hw_shape: {hw_shape}')
+    for batch_idx, num_gt in enumerate(gt_info['num_gt_per_image']):
+        if num_gt == 0:
+            continue
+            
+        batch_positions = feature_positions[batch_idx]  # [num_gt, 4]
+        batch_labels = gt_info['labels'][batch_idx]    # [num_gt]
+        
+        for gt_idx, (bbox, label) in enumerate(zip(batch_positions, batch_labels)):
+            x1, y1, x2, y2 = bbox
+            
+            # 确保坐标在有效范围内
+            x1 = max(0, min(x1, W-1))
+            y1 = max(0, min(y1, H-1))
+            x2 = max(0, min(x2, W))
+            y2 = max(0, min(y2, H))
+            
+            # 检查bbox是否有效
+            if x2 <= x1 or y2 <= y1:
+                continue
+                
+            # 计算bbox的宽高
+            w, h = x2 - x1, y2 - y1
+            #print(f'w: {w}, h: {h}')
+            # 生成高斯mask
+            gaussian = gaussian2D((int(h), int(w)), sigma=None, thresh=thresh)
+            
+            # 将高斯mask应用到对应区域 [注意：现在是batch维度]
+            masked_hm = mask[batch_idx, y1:y2, x1:x2]
+            np.maximum(masked_hm, gaussian, out=masked_hm)
+            
+            # 计算相对面积比例权重
+            area = w * h / (H * W)  # 相对面积
+            
+            # 小目标和大目标的相对比例设置
+            area_min, area_max = 0.01, 0.1  # 相对面积阈值
+            
+            if area < area_min:
+                r_size = (area_min / area) ** 0.5
+            elif area > area_max:
+                r_size = (area / area_max) ** 0.3
+            else:
+                r_size = 1.0
+            
+            # 类别权重
+            if label < len(cls_ratio):
+                r_cls = cls_ratio[label] ** 0.7
+            else:
+                r_cls = 1.0
+            
+            # 综合权重
+            r = max(r_size, r_cls)
+            
+            # 应用权重到对应区域
+            masked_wt = weight[batch_idx, y1:y2, x1:x2]
+            curr_wt = np.zeros_like(masked_wt) + math.log(r) + 1.
+            curr_wt *= (gaussian > 0).astype(mask.dtype)
+            np.maximum(masked_wt, curr_wt, out=masked_wt)
+    
+    # 确保mask值在[0, 1]范围内
+    mask = np.clip(mask, 0, 1)
+    
+    return mask, weight
+# 参考ESOD
+# def target2mask(targets, shape, nc, stride=8, thresh=0.5):
+# #生成mask
+# def gen_mask(label_path, image, cls_ratio=False, thresh=0.5, sam_only=False):
+
+def compute_loss_seg(p, masks, weight=None):
+    device = p.device
+    # 确保masks是tensor且在正确设备上
+    if not isinstance(masks, torch.Tensor):
+        masks = torch.from_numpy(masks).to(device)
+    else:
+        masks = masks.to(device)
+    
+    # 确保weight是tensor且在正确设备上
+    if weight is not None:
+        if not isinstance(weight, torch.Tensor):
+            weight = torch.from_numpy(weight).to(device)
+        else:
+            weight = weight.to(device)
+    
+    # 确保数据类型正确
+    masks = masks.float()
+    if weight is not None:
+        weight = weight.float()
+     # 确保masks有正确的维度 [B, H, W] -> [B, 1, H, W]
+    if masks.dim() == 3:
+        masks = masks.unsqueeze(1)  # [B, 1, H, W]
+    
+    # 确保weight有正确的维度 [B, H, W] -> [B, 1, H, W]
+    if weight is not None and weight.dim() == 3:
+        weight = weight.unsqueeze(1)  # [B, 1, H, W]
+
+    bs, nc, ny, nx = masks.shape
+    assert nc == 1
+    lpixl = torch.zeros(1, device=device)
+    # weight = None
+    lpixl += F.binary_cross_entropy_with_logits(p, masks, weight=weight)
+
+
+    return lpixl
+
+def autopad(k, p=None):  # kernel, padding
+    # Pad to 'same'
+    if p is None:
+        p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
+    return p
+
+class DWConvForObjSeeker(nn.Module):
+    def __init__(self,in_dim,out_dim,kernel_size=13,stride=1):
+        super().__init__()
+        self.dwconv = nn.Conv2d(in_dim,out_dim,kernel_size=kernel_size,stride=stride,padding=autopad(kernel_size),groups=math.gcd(in_dim,out_dim))
+        self.bn = nn.BatchNorm2d(out_dim)
+        self.act = nn.SiLU() 
+        
+    def forward(self,x):
+        return self.act(self.bn(self.dwconv(x)))
+
+class Segmenter(nn.Module):
+    def __init__(self, nc=10, ch=64):
+        super(Segmenter, self).__init__()
+        self.m = nn.Conv2d(ch, nc, 1)  # output conv
+    
+    def forward(self, x):
+        return self.m(x)
 
 from torchvision.ops import roi_align
 #TODO:第四处注入，需要形成原型库，使用原型库进行增强
@@ -1208,7 +1388,7 @@ class VisualSeekerAdapter(nn.Module):
         
         #Query/Prototype 初始化为 nn.Parameter
         self.m_queries = nn.Parameter(torch.randn(1, m, down_project_dim))
-        
+        self.query_init = False
         # 原型匹配网络：将GT特征投影到query空间
         # self.prototype_matcher = nn.Sequential(
         #     nn.Linear(down_project_dim, down_project_dim),
@@ -1235,6 +1415,66 @@ class VisualSeekerAdapter(nn.Module):
         self.gamma = nn.Parameter(torch.tensor(1e-1))
         # 原型库状态跟踪
         self.prototype_usage_count = nn.Parameter(torch.zeros(m), requires_grad=False)
+
+    def initialize_queries_with_gt(self, all_gt_features, all_gt_labels, noise_std=0.25):
+        """
+        基于GT特征的平均值初始化query，并添加噪声以增加多样性
+        
+        Args:
+            all_gt_features: 所有GT特征 [total_gt, C_proj]
+            all_gt_labels: 所有GT标签 [total_gt]
+            noise_std: 噪声标准差
+        """
+        if len(all_gt_features) == 0:
+            return
+            
+        # 计算所有GT特征的平均值和标准差
+        global_avg_feature = all_gt_features.mean(dim=0)  # [C_proj]
+        global_std_feature = all_gt_features.std(dim=0)  # [C_proj]
+        
+        # 按类别分组计算平均特征
+        unique_labels = torch.unique(all_gt_labels)
+        class_avg_features = {}
+        
+        for label in unique_labels:
+            label_mask = (all_gt_labels == label)
+            label_features = all_gt_features[label_mask]
+            if len(label_features) > 0:
+                class_avg_features[label.item()] = label_features.mean(dim=0)
+        
+        # 初始化query
+        m = self.m_queries.shape[1]  # query数量
+        C_proj = self.m_queries.shape[2]  # 特征维度
+        
+        # 策略1: 使用全局平均特征作为基础
+        base_feature = global_avg_feature
+        
+        # 策略2: 如果有足够的类别，使用类别平均特征
+        if len(class_avg_features) >= m:
+            # 选择前m个类别的平均特征
+            class_features = list(class_avg_features.values())[:m]
+            base_features = torch.stack(class_features)  # [m, C_proj]
+        else:
+            # 使用全局平均特征，并添加不同方向的噪声
+            base_features = base_feature.unsqueeze(0).expand(m, -1)  # [m, C_proj]
+        
+        # 自适应噪声：基于特征的标准差调整噪声强度
+        # 如果特征变化很大，使用更大的噪声；如果特征变化很小，使用较小的噪声
+        adaptive_noise_std = torch.clamp(global_std_feature.mean() * 0.5, min=0.1, max=0.5)
+        actual_noise_std = max(noise_std, adaptive_noise_std.item())
+        
+        # 添加噪声以增加多样性
+        noise = torch.randn_like(base_features) * actual_noise_std
+        initialized_queries = base_features + noise
+        
+        # 更新query参数
+        with torch.no_grad():
+            self.m_queries.data.copy_(initialized_queries.unsqueeze(0))  # [1, m, C_proj]
+        
+        # 标记为已初始化
+        self.query_init = True
+        
+        print(f"Query initialized with {len(unique_labels)} classes, {len(all_gt_features)} GT features, noise_std={actual_noise_std:.3f}")
 
     def extract_gt_features(self, activated_features, hw_shapes,gt_info):
         """
@@ -1346,7 +1586,7 @@ class VisualSeekerAdapter(nn.Module):
         
         return gt_features, gt_labels
 
-    def update_prototypes_with_gt(self, activated_features,hw_shapes,gt_info):
+    def update_prototypes_with_gt(self, activated_features, hw_shapes, gt_info):
         """
         基于GT信息更新query/prototype
         """
@@ -1375,6 +1615,11 @@ class VisualSeekerAdapter(nn.Module):
         # 拼接所有有效的GT特征
         all_gt_features = torch.cat(valid_features, dim=0)  # [total_valid_gt, C_proj]
         all_gt_labels = torch.cat(valid_labels, dim=0)  # [total_valid_gt]
+        
+        # 如果query还没有初始化，先进行初始化
+        if not self.query_init:
+            self.initialize_queries_with_gt(all_gt_features, all_gt_labels)
+            return  # 第一次调用只进行初始化，不进行更新
         
         # 按类别分组更新原型
         unique_labels = torch.unique(all_gt_labels)
@@ -1506,7 +1751,6 @@ class VisualSeekerAdapter(nn.Module):
         
         return identity + delta_x * self.gamma
 
-
 class DynamicSeekerAdapter(nn.Module):
     """
     动态寻找稀疏token并进行增强
@@ -1558,7 +1802,7 @@ class DynamicSeekerAdapter(nn.Module):
         self.norm = nn.LayerNorm(down_project_dim)
         
         # 残差缩放因子
-        self.gamma = nn.Parameter(torch.tensor(1e-1))
+        self.gamma = nn.Parameter(torch.tensor(1.0))
 
 
 
@@ -1577,7 +1821,8 @@ class DynamicSeekerAdapter(nn.Module):
             projected_text_feat = self.text_projector(text_features)  # (B, L, C_proj)
             # 2) consistency_loss只用CLS
             projected_text_feat_for_loss = projected_text_feat[:, 0, :].unsqueeze(1)  # (B, 1, C_proj)
-            consistency_loss = feature_consistency_loss(activated_features, projected_text_feat_for_loss)
+            consistency_loss = feature_consistency_loss(activated_features, projected_text_feat_for_loss.detach())
+            #原来是：consistency_loss = feature_consistency_loss(activated_features, projected_text_feat_for_loss)
         else:
             # 不做投影，直接截断
             projected_text_feat = text_features[:, :, :self.projected_dim]  # (B, L, C_proj)
@@ -1611,29 +1856,7 @@ class DynamicSeekerAdapter(nn.Module):
                 image_scores, _ = image_scores.max(dim=2)  # (B, N)
             else:
                 raise ValueError("token_of_interest必须为None、'all'、int或list/tuple")
-        # --- 2. 文本引导与 Top-k 选择 (在激活后的特征上进行) ---
-        # 替代方案：只用CLS token
-        # pooled_text_feat = text_features[:,0] #使用CLS token
-        # if self.text_consistency_loss:
-        #     projected_text_feat = self.text_projector(pooled_text_feat).unsqueeze(1)
-        #     consistency_loss = feature_consistency_loss(activated_features, projected_text_feat)
-        # # 现在权宜方案，直接截断取前64维
-        # else:
-        #     projected_text_feat = pooled_text_feat[:, :self.projected_dim].unsqueeze(1)
-        # norm_image_features = F.normalize(activated_features, p=2, dim=-1)
-        # norm_key_text_tokens = F.normalize(projected_text_feat, p=2, dim=-1)
-        # image_scores = torch.bmm(norm_image_features, norm_key_text_tokens.transpose(1, 2)).squeeze(-1)
-
-        # --- 2. 文本引导与 Top-k 选择 (在激活后的特征上进行) ---
-        # 替代方案：使用所有token
-        # projected_text_feat = text_features[:, :, :self.projected_dim]  # (B, L, C_proj)
-        # norm_image_features = F.normalize(activated_features, p=2, dim=-1)  # (B, N, C_proj)
-        # norm_key_text_tokens = F.normalize(projected_text_feat, p=2, dim=-1)  # (B, L, C_proj)
-        # # 计算所有图像token与所有文本token的相似度
-        # image_scores = torch.bmm(norm_image_features, norm_key_text_tokens.transpose(1, 2))  # (B, N, L)
-        # # 在文本token维度取最大值
-        # image_scores, _ = image_scores.max(dim=2)  # (B, N)
-        
+       
         # --------- 用STE生成mask ---------
         mask = ste_topk_mask(image_scores, self.k)  # (B, N)
         # 获取topk的索引
@@ -1674,9 +1897,9 @@ class DynamicSeekerAdapter(nn.Module):
         else:
             return identity + delta_x * self.gamma
 
-class OmniDynamicSeekerAdapter(nn.Module):
+class QuerySeekerAdapter(nn.Module):
     """
-    动态寻找稀疏token并进行增强，区别是将文本和视觉对齐到了同一个空间
+    动态寻找稀疏token并进行增强
     """
     def __init__(self,
                  in_dim,
@@ -1693,21 +1916,22 @@ class OmniDynamicSeekerAdapter(nn.Module):
         self.k = k
         self.in_dim = in_dim
         self.projected_dim = down_project_dim
-
+        self.text_dim = text_dim
         # --- 核心 Adapter 结构 ---
         # 1. 降维
-        self.down_project = nn.Linear(in_dim,text_dim)
-        self.omni_down_project = nn.Linear(text_dim, down_project_dim)
+        self.down_project = nn.Linear(in_dim, down_project_dim)
         # 2. 非线性激活与 Dropout (紧跟降维之后)
         self.nonlinear_activation = F.gelu
         self.dropout = nn.Dropout(dropout_rate)
         # 3. 升维
         self.up_project = nn.Linear(down_project_dim, in_dim)
         # --- 结构结束 ---
-        
-        # Query 初始化为 nn.Parameter
+        # Query 初始化为 nn.Parameter，起到码表的作用
         self.m_queries = nn.Parameter(torch.randn(1, m, down_project_dim))
-        
+        self.text_projector = nn.Linear(text_dim,down_project_dim)
+        self.text_nonlinear_activation = F.gelu
+        self.text_reconstructor = nn.Linear(down_project_dim, text_dim)
+        self.image_reconstructor = nn.Linear(down_project_dim, down_project_dim)
         # 交互模块: 只有一个自注意力层和 LayerNorm
         self.interaction_attention = nn.MultiheadAttention(
             embed_dim=down_project_dim,
@@ -1715,72 +1939,534 @@ class OmniDynamicSeekerAdapter(nn.Module):
             batch_first=True
         )
         self.norm = nn.LayerNorm(down_project_dim)
-        
         # 残差缩放因子
         self.gamma = nn.Parameter(torch.tensor(1e-1))
 
 
 
-    def forward(self, image_features, hw_shapes=None,text_features=None):
+    def forward(self, image_features, hw_shapes=None, text_features=None):
+        #1.常规adapter操作：对视觉特征进行降维
+        #2.文本量化投影：将文本投影降维，并通过欧式距离量化到query上
+        #3.辅助损失1：query尝试重建到文本原特征，L2Norm计算损失，保证query和文本的关联
+        #4.辅助损失2：query尝试重建到视觉池化特征上，同样L2Norm计算损失，保证query和视觉的关联
+        #5.辅助损失3：query和文本本身投影特征，L2Norm计算损失，保证query和文本投影的更新
+        #6.基于query寻找相似度最高topk的图像特征块
+        #7.稀疏attn增强topk特征
+        #8.升维+残差
         assert text_features is not None, "text_features 不能为 None"
-        #TODO：1.实现辅助loss 2.增加修改输出为维度（）
         B, N, C_in = image_features.shape
         identity = image_features
-        
+
         # --- 1. 对输入特征应用 Adapter 前半部分：降维 -> GELU -> Dropout ---
-        projected_features = self.down_project(image_features) #到text_dim了
-        projected_features = self.dropout(self.nonlinear_activation(projected_features))
-        activated_features = self.omni_down_project(projected_features) # -> (B, N, C_proj)
+        projected_features = self.down_project(image_features)
+        activated_features = self.dropout(self.nonlinear_activation(projected_features)) # (B, N, C_proj)
 
-        # --- 2. 文本引导与 Top-k 选择 (在激活后的特征上进行) ---
-        # #原来的
-        pooled_text_feat = text_features[:,0] #使用CLS token
-        projected_text_feat = self.omni_down_project(pooled_text_feat).unsqueeze(1)
-        eps = 1e-8
-        norm_image_features = F.normalize(activated_features+eps, p=2, dim=-1)
-        norm_key_text_tokens = F.normalize(projected_text_feat+eps, p=2, dim=-1)
-        image_scores = torch.bmm(norm_image_features, norm_key_text_tokens.transpose(1, 2)).squeeze(-1)
-
+        # --- 2. 文本量化投影：将文本投影降维，并通过欧式距离量化到query上 ---
+        # 使用文本投影层将文本特征投影到降维空间
+        text_features = text_features.detach()
+        projected_text_feat = self.text_projector(text_features)  # (B, L, C_proj)
+        projected_text_feat = self.text_nonlinear_activation(projected_text_feat)
         
-        # --------- 用STE生成mask ---------
+        # 使用全部文本token进行计算
+        L_query = self.m
+        L_text = projected_text_feat.shape[1]
+        queries = self.m_queries.expand(B, -1, -1)  # (B, m, C_proj)
+        norm_queries = F.normalize(queries, p=2, dim=-1)
+        norm_text_feat = F.normalize(projected_text_feat, p=2, dim=-1)
+        
+        # 计算query与文本的相似度
+        query_text_similarity = torch.bmm(norm_queries, norm_text_feat.transpose(1, 2))  # (B, m, L)
+        
+        # 选择最相似的query进行量化 (每个文本token对应一个最相似的query)
+        quantized_query_idx = query_text_similarity.argmax(dim=1)  # (B, L)
+        #quantized_queries = queries[torch.arange(B).unsqueeze(1), quantized_query_idx]  # (B, L, C_proj)
+        quantized_queries = torch.gather(
+            queries, dim=1,
+            index=quantized_query_idx.unsqueeze(-1).expand(-1, -1, queries.size(-1))
+        )  # (B, L, C_proj)
+        # --- 3-5. 计算辅助损失 ---
+        # 辅助损失1：query尝试重建到文本原特征 (使用全部文本token)
+        text_reconstructed = self.text_reconstructor(quantized_queries)  # (B, L, text_dim)
+        loss1 = 0.1 * F.mse_loss(text_reconstructed, text_features)
+        
+        # 辅助损失2：query尝试重建到视觉池化特征
+        image_pooled = activated_features.mean(dim=1, keepdim=True)  # (B, 1, C_proj)
+        image_pooled_expanded = image_pooled.expand(-1, L_text, -1)  # (B, L, C_proj)
+        image_reconstructed = self.image_reconstructor(quantized_queries)  # (B, L, C_proj)
+        loss2 = 0.1 * F.mse_loss(image_reconstructed, image_pooled_expanded)
+        
+        # 辅助损失3：像VQVAE一样，让query特征和文本降维后的特征分别梯度解耦然后算损失
+        # 对quantized_queries和projected_text_feat分别进行梯度截断
+        quantized_queries_detached = quantized_queries.detach()
+        projected_text_feat_detached_for_loss = projected_text_feat.detach()
+        loss3 = 0.1 *F.mse_loss(quantized_queries_detached, projected_text_feat)+0.25*0.1*F.mse_loss(quantized_queries, projected_text_feat_detached_for_loss)
+        
+        # 总辅助损失
+        #aux_loss = (loss1 + loss3)*5
+        aux_loss = (loss1 + loss2 + loss3)*2
+
+        # --- 6. 基于query寻找相似度最高topk的图像特征块 ---
+        # 使用量化后的query计算与图像特征的相似度
+        norm_quantized_queries = F.normalize(quantized_queries, p=2, dim=-1)  # (B, L, C_proj)
+        norm_image_features = F.normalize(activated_features, p=2, dim=-1)  # (B, N, C_proj)
+        image_scores = torch.bmm(norm_image_features, norm_quantized_queries.transpose(1, 2))  # (B, N, L)
+        # 在文本token维度取最大值，得到每个图像token与所有文本token的最大相似度
+        image_scores, _ = image_scores.max(dim=2)  # (B, N)
+        
+        # 使用STE生成topk mask
         mask = ste_topk_mask(image_scores, self.k)  # (B, N)
-        # 获取topk的索引
         topk_indices = mask.nonzero(as_tuple=False).view(B, self.k, 2)[:,:,1]  # (B, k)
         topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, self.projected_dim)
         sparse_image_tokens = torch.gather(activated_features, 1, topk_indices_expanded)
 
-        # --- 3. 简化版注意力交互 ---
-        queries = self.m_queries.expand(B, -1, -1)
-        combined_sequence = torch.cat([queries, sparse_image_tokens], dim=1)
+        # --- 7. 稀疏attn增强topk特征 ---
+        # 将量化后的query与稀疏图像token结合
+        combined_sequence = torch.cat([quantized_queries, sparse_image_tokens], dim=1)  # (B, L+k, C_proj)
         
         # 交互: Norm -> Self-Attention -> Add
         attention_input = self.norm(combined_sequence)
         attention_output, _ = self.interaction_attention(
             query=attention_input, key=attention_input, value=attention_input
         )
-        # 只有一个残差连接，没有后续 FFN
         enhanced_sequence = combined_sequence + attention_output
         
-        # 分离出增强后的图像 token和query
-        enhanced_queries = enhanced_sequence[:, :self.m, :]  # (B, m, C_proj)
-        enhanced_sparse_tokens = enhanced_sequence[:, self.m:, :]
+        # 分离出增强后的图像token
+        enhanced_sparse_tokens = enhanced_sequence[:, L_text:, :]  # (B, k, C_proj)
 
-        # 替换原本的 query 参数，使用不带梯度的EMA平滑更新
-        with torch.no_grad():
-            self.m_queries.copy_(0.8 * self.m_queries + 0.2 * enhanced_queries.mean(dim=0, keepdim=True))
-        
-        # --- 4. 信息还原与升维 ---
+        # --- 8. 升维+残差 ---
         # 创建一个与激活后特征图形状相同的零张量
         delta_x_projected = torch.zeros_like(activated_features)
         delta_x_projected.scatter_(1, topk_indices_expanded, enhanced_sparse_tokens)
         
         # 应用 Adapter 后半部分：升维
-        delta_x = self.up_project(delta_x_projected) # -> (B, N, C_in)
+        delta_x = self.up_project(delta_x_projected)  # -> (B, N, C_in)
         
-        return identity + delta_x * self.gamma
+        return identity + delta_x * self.gamma, aux_loss
+
+    def old_forward(self, image_features, hw_shapes=None, text_features=None):
+        #1.常规adapter操作：对视觉特征进行降维
+        #2.文本投影：将文本投影降维或者截断，降维则产生和视觉池化特征匹配的损失
+        #3.文本寻找相似度最高topk
+        #4.可学习query稀疏attn增强topk特征，ema更新query
+        #5.升维+残差
+        # return identity + delta_x * self.gamma
+        return image_features
 
 
 
+class HyperNetworksGenerator(nn.Module):
+
+    def __init__(self, n_z: int, n_in: int, n_out: int, f_size: int = 3, init_scale: float = 1e-2):
+        super(HyperNetworksGenerator, self).__init__()
+
+        # 参数顺序与 HyperNetworksGenerator 保持一致
+        self.n_z = n_z
+        d = n_in*n_z
+        self.d = d
+        self.n_in = n_in
+        self.n_out = n_out
+        self.f_size = f_size
+        self.init_scale = init_scale
+
+        output_dim = n_in * f_size * f_size * n_out
+
+        # 手动参数（不使用 nn.Linear），但使用现代初始化方式
+        self.w2 = nn.Parameter(torch.empty(n_z, d))      # 对应第一层权重: z -> d
+        self.b2 = nn.Parameter(torch.empty(d))           # 第一层偏置
+        self.w1 = nn.Parameter(torch.empty(d, output_dim))  # 对应第二层权重: d -> 输出
+        self.b1 = nn.Parameter(torch.empty(output_dim))     # 第二层偏置
+
+        self._init_parameters()
+
+    def _init_parameters(self) -> None:
+        # Safer initialization for dynamic conv generator
+        nn.init.kaiming_normal_(self.w2, mode='fan_in', nonlinearity='linear')
+        nn.init.zeros_(self.b2)
+        nn.init.kaiming_normal_(self.w1, mode='fan_in', nonlinearity='linear')
+        # Scale down final projection to keep initial dynamic kernels small
+        with torch.no_grad():
+            self.w1.mul_(self.init_scale)
+        nn.init.zeros_(self.b1)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # 确保 z 与模型参数在同一设备上
+        z = z.to(next(self.parameters()).device)
+        
+        # 支持 [n_z] 或 [batch, n_z]
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+
+        # 第一层: z -> d
+        hidden = torch.matmul(z, self.w2) + self.b2  # [batch, d]
+        # 第二层: d -> n_in * f * f * n_out
+        weights_flat = torch.matmul(hidden, self.w1) + self.b1  # [batch, output_dim]
+
+        # 还原为卷积核形状，与 HyperNetworksGenerator 一致
+        K = weights_flat.reshape(-1, self.n_in, self.f_size, self.f_size, self.n_out)
+        # Optional: clip/tanh to improve early stability
+        K = torch.tanh(K)
+
+        if squeeze_output:
+            K = K.squeeze(0)
+
+        return K
+
+class HyperConv2d(nn.Module):
+    """
+    使用 HyperNetworks 生成的卷积层
+    """
+    
+    def __init__(self, 
+                 stride: int = 1,
+                 padding: int = 1):
+        super(HyperConv2d, self).__init__()
+        
+        self.stride = stride
+        self.padding = padding
+        
+    def forward(self, x: torch.Tensor, z: torch.Tensor, generator: "HyperNetworksGenerator") -> torch.Tensor:
+        # 生成带 batch 的权重: [B, n_in, k, k, n_out]
+        weights = generator(z)
+        
+        # 确保权重与输入在同一设备上
+        weights = weights.to(x.device)
+
+        # 输入: [B, C_in, H, W]
+        B, C_in, H, W = x.shape
+        assert weights.dim() == 5, "generator(z) 应返回 [B, n_in, k, k, n_out]"
+
+        # 重排为 [B, C_out, C_in, k, k]
+        weights = weights.permute(0, 4, 1, 2, 3)
+        B_w, C_out, C_in_w, K, _ = weights.shape
+        assert B_w == B and C_in_w == C_in, "输入与生成权重的 batch 或通道数不匹配"
+
+        # 使用 grouped conv 实现 per-sample 卷积
+        x_group = x.reshape(1, B * C_in, H, W)
+        # Fan-in scaling to prevent large activations
+        scale = 1.0 / math.sqrt(C_in * K * K)
+        w_group = (weights * scale).reshape(B * C_out, C_in, K, K)
+        y = F.conv2d(x_group, w_group, stride=self.stride, padding=self.padding, groups=B)
+        y = y.reshape(B, C_out, y.shape[-2], y.shape[-1])
+        return y
+#TODO:手动复现版本
+class HyperAdapter(BaseModule):
+    def __init__(self,
+                 in_dim,
+                 m=16):
+        super().__init__()
+
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+
+        self.dropout = nn.Dropout(p=0.1)
+
+        # 不将generator作为模块参数存储，而是通过外部传入
+        self.m_queries = nn.Parameter(torch.randn(1, m, 64))
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+        
+        # 预创建HyperConv2d，避免每次forward都创建新实例
+        self.hyper_conv = None
+
+    def forward(self, x, generator, hw_shapes=None):
+        identity = x
+        x = self.norm(x) * self.gamma + x * self.gammax
+
+        project1 = self.project1(x)
+
+        b, n, c = project1.shape
+        h, w = hw_shapes
+        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
+        # project1: [b, c, h, w] -> [b, hw, c]
+        x_flat = project1.reshape(b, c, h * w).permute(0, 2, 1)
+        # m_queries: [1, m, c] -> [b, m, c]
+        q = self.m_queries.expand(b, -1, -1)
+        # 相似度: [b, m, c] x [b, c, hw] -> [b, m, hw]
+        sim = torch.matmul(q, x_flat.transpose(1, 2))
+        attn = F.softmax(sim, dim=-1)
+        # 加权求和: [b, m, hw] x [b, hw, c] -> [b, m, c]
+        z_per_query = torch.matmul(attn, x_flat)
+        # 对 m 维求平均，得到 [b, c]
+        z = z_per_query.mean(dim=1)
+        
+        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
+        if self.hyper_conv is None:
+            self.hyper_conv = HyperConv2d(padding=generator.f_size//2)
+        project1 = self.hyper_conv(project1, z, generator)
+        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
+
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+
+        return identity + project2
+
+class HyperAdapterMona(BaseModule):
+    def __init__(self,
+                 in_dim,
+                 m=16):
+        super().__init__()
+
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+
+        self.dropout = nn.Dropout(p=0.1)
+
+        # 不将generator作为模块参数存储，而是通过外部传入
+        self.m_queries = nn.Parameter(torch.randn(1, m, 64))
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+        
+        # 预创建HyperConv2d，避免每次forward都创建新实例
+        self.hyper_conv = None
+        self.static_conv = MonaOp(64)
+
+    def forward(self, x, generator, hw_shapes=None):
+        identity = x
+        x = self.norm(x) * self.gamma + x * self.gammax
+
+        project1 = self.project1(x)
+
+        b, n, c = project1.shape
+        h, w = hw_shapes
+        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
+        # project1: [b, c, h, w] -> [b, hw, c]
+        x_flat = project1.reshape(b, c, h * w).permute(0, 2, 1)
+        # m_queries: [1, m, c] -> [b, m, c]
+        q = self.m_queries.expand(b, -1, -1)
+        # 相似度: [b, m, c] x [b, c, hw] -> [b, m, hw]
+        sim = torch.matmul(q, x_flat.transpose(1, 2))
+        attn = F.softmax(sim, dim=-1)
+        # 加权求和: [b, m, hw] x [b, hw, c] -> [b, m, c]
+        z_per_query = torch.matmul(attn, x_flat)
+        # 对 m 维求平均，得到 [b, c]
+        z = z_per_query.mean(dim=1)
+        
+        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
+        if self.hyper_conv is None:
+            self.hyper_conv = HyperConv2d(padding=generator.f_size//2)
+        old_project1 = project1
+        project1 = self.hyper_conv(project1, z, generator)
+        old_project1 = self.static_conv(old_project1)
+        project1 = project1 + old_project1
+        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
+
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+
+        return identity + project2
+
+#TODO:设计多路的HyperAdapter
+class HyperAdapterMulti(BaseModule):
+    def __init__(self,
+                 in_dim,
+                 m=16):
+        super().__init__()
+
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+
+        self.dropout = nn.Dropout(p=0.1)
+
+        # 不将generator作为模块参数存储，而是通过外部传入
+        self.m_queries = nn.Parameter(torch.randn(1, m, 64))
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+        
+        # 预创建HyperConv2d，避免每次forward都创建新实例
+        self.hyper_convs = []
+
+    def forward(self, x, generators, hw_shapes=None):
+        identity = x
+        x = self.norm(x) * self.gamma + x * self.gammax
+
+        project1 = self.project1(x)
+
+        b, n, c = project1.shape
+        h, w = hw_shapes
+        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
+        # project1: [b, c, h, w] -> [b, hw, c]
+        x_flat = project1.reshape(b, c, h * w).permute(0, 2, 1)
+        # m_queries: [1, m, c] -> [b, m, c]
+        q = self.m_queries.expand(b, -1, -1)
+        # 相似度: [b, m, c] x [b, c, hw] -> [b, m, hw]
+        sim = torch.matmul(q, x_flat.transpose(1, 2))
+        attn = F.softmax(sim, dim=-1)
+        # 加权求和: [b, m, hw] x [b, hw, c] -> [b, m, c]
+        z_per_query = torch.matmul(attn, x_flat)
+        # 对 m 维求平均，得到 [b, c]
+        z = z_per_query.mean(dim=1)
+        
+        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
+        if len(self.hyper_convs) == 0:
+            for generator in generators:
+                self.hyper_convs.append(HyperConv2d(padding=generator.f_size//2))
+
+        # 自动同步设备（避免隐式跨设备拷贝）
+        x_device = x.device
+        for gen in generators:
+            try:
+                gen_device = next(gen.parameters()).device
+                if gen_device != x_device:
+                    gen.to(x_device)
+            except StopIteration:
+                # 如果 generator 没有参数，跳过设备检查
+                pass
+
+        # 流式融合以降低显存峰值和分支复杂度
+        if len(generators) > 0:
+            fused_sum = None
+            for i, generator in enumerate(generators):
+                out_i = self.hyper_convs[i](project1, z, generator)
+                if fused_sum is None:
+                    fused_sum = out_i
+                else:
+                    fused_sum = fused_sum + out_i
+            fused = fused_sum / float(len(generators))
+            project1 = project1 + fused
+        
+        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
+
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+
+        return identity + project2
+
+#TODO:视觉-文本两路特征卷积
+class HyperAdapterVL(BaseModule):
+    def __init__(self,
+                 in_dim,
+                 ):
+        super().__init__()
+
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+
+        self.dropout = nn.Dropout(p=0.1)
+
+        # 不将generator作为模块参数存储，而是通过外部传入
+        
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+        self.gamma_vis = nn.Parameter(torch.tensor(5e-1))
+        
+        # 预创建HyperConv2d，避免每次forward都创建新实例
+        self.hyper_conv_vis = None
+        self.hyper_conv_text = None
+
+    def forward(self, x, generator, hw_shapes=None, text_features=None):
+        identity = x
+        x = self.norm(x) * self.gamma + x * self.gammax
+
+        project1 = self.project1(x)
+
+        b, n, c = project1.shape
+        h, w = hw_shapes
+        z_vis = project1.mean(dim=1)
+        z_text = text_features.mean(dim=1)[:,:64]
+        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
+        # project1: [b, c, h, w] -> [b, hw, c]
+        
+        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
+        if self.hyper_conv_vis is None:
+            self.hyper_conv_vis = HyperConv2d(padding=generator.f_size//2)
+        if self.hyper_conv_text is None:
+            self.hyper_conv_text = HyperConv2d(padding=generator.f_size//2)
+        
+        project1_vis = self.hyper_conv_vis(project1, z_vis, generator)
+        project1_text = self.hyper_conv_text(project1, z_text, generator)
+        project1 = project1_vis * self.gamma_vis + project1_text * (1 - self.gamma_vis)
+        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
+
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+
+        return identity + project2
+        
+
+#TODO:利用esod寻找
+class HyperAdapterESODSeeker(BaseModule):
+    def __init__(self,
+                 in_dim,
+                 ):
+        super().__init__()
+
+        self.project1 = nn.Linear(in_dim, 64)
+        self.nonlinear = F.gelu
+        self.project2 = nn.Linear(64, in_dim)
+
+        self.dropout = nn.Dropout(p=0.1)
+
+        # 不将generator作为模块参数存储，而是通过外部传入
+        
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+        self.dwconv = DWConvForObjSeeker(64, 64, kernel_size=13, stride=1)
+        self.heatmap_conv = Segmenter(nc=1,ch=64)
+        
+        # 预创建HyperConv2d，避免每次forward都创建新实例
+        self.hyper_conv = None
+        
+
+    def forward(self, x, generator, hw_shapes=None, gt_info=None):
+        if gt_info is not None:
+            mask,weight = gen_adapter_mask(gt_info,hw_shapes)
+        identity = x
+        x = self.norm(x) * self.gamma + x * self.gammax
+
+        project1 = self.project1(x)
+
+        b, n, c = project1.shape
+        h, w = hw_shapes
+
+       
+        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
+        # project1: [b, c, h, w] -> [b, hw, c]
+        pred = self.dwconv(project1)
+        pred = self.heatmap_conv(pred)
+        # pred: [B, 1, H, W]，用 sigmo id（或直接二值）作为权重，不做 softmax
+        weights = (pred > 0.2).float()  # 若需严格二值，可改为 (pred > 0).float()
+        # 归一化加权平均，避免权重和为 0 的数值问题
+        num = (project1 * weights).sum(dim=(2, 3))            # [B, C]
+        den = weights.sum(dim=(2, 3)).clamp_min(1e-6)         # [B, 1]
+        z = num / den                                         # [B, C]
+        
+        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
+        if self.hyper_conv is None:
+            self.hyper_conv = HyperConv2d(padding=generator.f_size//2)
+        project1 = self.hyper_conv(project1, z, generator)
+        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
+
+        nonlinear = self.nonlinear(project1)
+        nonlinear = self.dropout(nonlinear)
+        project2 = self.project2(nonlinear)
+
+
+        if gt_info is not None:
+            loss_seg = compute_loss_seg(pred,mask,weight)
+            return identity + project2,loss_seg*0.1
+        else:
+            return identity + project2
 
 @MODELS.register_module()
 class SwinTransformer(BaseModule):
@@ -1846,6 +2532,9 @@ class SwinTransformer(BaseModule):
             Default: None. #用于VPT模式
         text_dim (int): 文本维度,默认256,用于seeker_adapter
         text_consistency_loss (bool): 是否使用文本一致性损失,用于seeker_adapter
+        esod_loss (bool): 是否使用ESOD损失,用于obj_seeker
+        adapter_stages (list or None): 指定哪些stage启用adapter。例如[2, 3]表示只在第3和第4个stage启用adapter。
+            如果为None，则根据finetune_mode决定是否在所有stage启用adapter。默认: None
     """
 
     def __init__(self,
@@ -1879,6 +2568,8 @@ class SwinTransformer(BaseModule):
                  text_dim=256,
                  text_consistency_loss=False,
                  tokens_of_interest=None,
+                 esod_loss=False,
+                 adapter_stages=None,
                  ):
         self.convert_weights = convert_weights
         self.frozen_stages = frozen_stages
@@ -1973,8 +2664,20 @@ class SwinTransformer(BaseModule):
                 raise ValueError("Other initiation scheme is not supported")
         #这里初始化text_consistency_loss
         self.text_consistency_loss = text_consistency_loss
+        self.esod_loss = esod_loss
+        self.adapter_stages = adapter_stages
+
+        if finetune_mode is not None and 'hyperadapter' in finetune_mode and 'hyperadapter_multi' not in finetune_mode:
+            self.hyper_generator = HyperNetworksGenerator(n_z=64, n_in=64, n_out=64, f_size=3)
+        elif finetune_mode is not None and 'hyperadapter_multi' in finetune_mode:
+            self.hyper_generator = []
+            for i in [1,3,3]:
+                self.hyper_generator.append(HyperNetworksGenerator(n_z=64, n_in=64, n_out=64, f_size=i))
+        else:
+            self.hyper_generator = None
         self.stages = ModuleList()
         in_channels = embed_dims
+
         for i in range(num_layers):
             if i < num_layers - 1:
                 downsample = PatchMerging(
@@ -2010,6 +2713,9 @@ class SwinTransformer(BaseModule):
                 text_dim=text_dim,
                 text_consistency_loss=text_consistency_loss,
                 tokens_of_interest=tokens_of_interest,
+                esod_loss = esod_loss,
+                stage_index=i,
+                adapter_stages=self.adapter_stages,
                 )
             self.stages.append(stage)
             if downsample:
@@ -2067,13 +2773,33 @@ class SwinTransformer(BaseModule):
                 for name, param in self.named_parameters():
                     if 'seeker_module' not in name:
                         param.requires_grad = requires_grad
+            elif finetune_mode == 'query_seeker':
+                for name, param in self.named_parameters():
+                    if 'query_seeker_module' not in name:
+                        param.requires_grad = requires_grad
+            elif finetune_mode == 'esod_query_seeker':
+                for name, param in self.named_parameters():
+                    if 'esod_query_seeker_module' not in name:
+                        param.requires_grad = requires_grad
+            elif finetune_mode == 'obj_seeker': #来自ESOD的有gt的模块
+                for name, param in self.named_parameters():
+                    if 'obj_seeker_module' not in name:
+                        param.requires_grad = requires_grad
             elif finetune_mode == 'visual_seeker':
                 for name, param in self.named_parameters():
                     if 'visual_seeker_module' not in name:
                         param.requires_grad = requires_grad
+            elif finetune_mode == 'classaware_visual_seeker':
+                for name, param in self.named_parameters():
+                    if 'classaware_visual_seeker_module' not in name:
+                        param.requires_grad = requires_grad
             elif finetune_mode == 'omni_seeker':
                 for name, param in self.named_parameters():
                     if 'omni_seeker_module' not in name:
+                        param.requires_grad = requires_grad
+            elif 'hyperadapter' in finetune_mode:
+                for name, param in self.named_parameters():
+                    if 'hyperadapter' not in name and 'hyper_generator' not in name:
                         param.requires_grad = requires_grad
         if self.is_vpt:
             for name, param in self.named_parameters():
@@ -2186,6 +2912,8 @@ class SwinTransformer(BaseModule):
     def forward(self, x,text_features=None,gt_info=None):
         if self.text_consistency_loss:
             consistency_loss = torch.zeros(1, device=x.device)
+        elif self.esod_loss and gt_info is not None:
+            seg_loss = torch.zeros(1, device=x.device)
         if getattr(self, 'is_vpt', False):
             # VPT模式
             x, hw_shape = self.patch_embed(x)
@@ -2200,10 +2928,13 @@ class SwinTransformer(BaseModule):
             if not self.prompt_deep:
                 for i, stage in enumerate(self.stages):
                     if self.text_consistency_loss:
-                        x, hw_shape, out, out_hw_shape, consistency_loss_i = stage(x, hw_shape,text_features)
+                        x, hw_shape, out, out_hw_shape, consistency_loss_i = stage(x, hw_shape,text_features,gt_info=gt_info, hyper_generator=self.hyper_generator)
                         consistency_loss += consistency_loss_i
+                    elif self.esod_loss and gt_info is not None:
+                        x, hw_shape, out, out_hw_shape, seg_loss_i = stage(x, hw_shape,text_features,gt_info=gt_info, hyper_generator=self.hyper_generator)
+                        seg_loss += seg_loss_i
                     else:
-                        x, hw_shape, out, out_hw_shape = stage(x, hw_shape,text_features)
+                        x, hw_shape, out, out_hw_shape = stage(x, hw_shape,text_features,gt_info=gt_info, hyper_generator=self.hyper_generator)
                     if i in self.out_indices:
                         norm_layer = getattr(self, f'norm{i}')
                         out = norm_layer(out)
@@ -2214,10 +2945,13 @@ class SwinTransformer(BaseModule):
             else:
                 for i, (stage, deep_prompt_emb) in enumerate(zip(self.stages, self.vpt_deep_prompt_embeddings)):
                     if self.text_consistency_loss:
-                        x, hw_shape, out, out_hw_shape, consistency_loss_i = stage(x, hw_shape,text_features,deep_prompt_emb)
+                        x, hw_shape, out, out_hw_shape, consistency_loss_i = stage(x, hw_shape,text_features,deep_prompt_emb,gt_info=gt_info, hyper_generator=self.hyper_generator)
                         consistency_loss += consistency_loss_i
+                    elif self.esod_loss and gt_info is not None:
+                        x, hw_shape, out, out_hw_shape, seg_loss_i = stage(x, hw_shape,text_features,gt_info=gt_info, hyper_generator=self.hyper_generator)
+                        seg_loss += seg_loss_i
                     else:
-                        x, hw_shape, out, out_hw_shape = stage(x, hw_shape,text_features,deep_prompt_emb)
+                        x, hw_shape, out, out_hw_shape = stage(x, hw_shape,text_features,deep_prompt_emb,gt_info=gt_info, hyper_generator=self.hyper_generator)
                     if i in self.out_indices:
                         norm_layer = getattr(self, f'norm{i}')
                         out = norm_layer(out)
@@ -2227,6 +2961,8 @@ class SwinTransformer(BaseModule):
                         outs.append(out)
             if self.text_consistency_loss:
                 return outs, consistency_loss
+            elif self.esod_loss and gt_info is not None:
+                return outs,seg_loss
             else:
                 return outs
         else:
@@ -2238,10 +2974,13 @@ class SwinTransformer(BaseModule):
             outs = []
             for i, stage in enumerate(self.stages):
                 if self.text_consistency_loss:
-                    x, hw_shape, out, out_hw_shape, consistency_loss_i = stage(x, hw_shape,text_features)
+                    x, hw_shape, out, out_hw_shape, consistency_loss_i = stage(x, hw_shape,text_features,gt_info=gt_info, hyper_generator=self.hyper_generator)
                     consistency_loss += consistency_loss_i
+                elif self.esod_loss and gt_info is not None:
+                    x, hw_shape, out, out_hw_shape, seg_loss_i = stage(x, hw_shape,text_features,gt_info=gt_info, hyper_generator=self.hyper_generator)
+                    seg_loss += seg_loss_i
                 else:
-                    x, hw_shape, out, out_hw_shape = stage(x, hw_shape,text_features)
+                    x, hw_shape, out, out_hw_shape = stage(x, hw_shape,text_features,gt_info=gt_info, hyper_generator=self.hyper_generator)
                 if i in self.out_indices:
                     norm_layer = getattr(self, f'norm{i}')
                     out = norm_layer(out)
@@ -2251,6 +2990,8 @@ class SwinTransformer(BaseModule):
                     outs.append(out)
             if self.text_consistency_loss:
                 return outs, consistency_loss
+            elif self.esod_loss and gt_info is not None:
+                return outs,seg_loss
             else:
                 return outs
 
@@ -2308,3 +3049,4 @@ def swin_converter(ckpt):
         new_ckpt['backbone.' + new_k] = new_v
 
     return new_ckpt
+

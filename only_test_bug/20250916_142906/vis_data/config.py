@@ -1,129 +1,3 @@
-/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py:178: FutureWarning: The module torch.distributed.launch is deprecated
-and will be removed in future. Use torchrun.
-Note that --use_env is set by default in torchrun.
-If your script expects `--local_rank` argument to be set, please
-change it to read from `os.environ['LOCAL_RANK']` instead. See 
-https://pytorch.org/docs/stable/distributed.html#launch-utility for 
-further instructions
-
-  warnings.warn(
-WARNING:torch.distributed.elastic.agent.server.api:Received 2 death signal, shutting down workers
-WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 3235 closing signal SIGINT
-Traceback (most recent call last):
-  File "<frozen importlib._bootstrap>", line 671, in _load_unlocked
-  File "<frozen importlib._bootstrap_external>", line 843, in exec_module
-  File "<frozen importlib._bootstrap>", line 219, in _call_with_frames_removed
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/optim/functional_adamw.py", line 17, in <module>
-    class _FunctionalAdamW(object):
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/jit/_script.py", line 1323, in script
-    _compile_and_register_class(obj, _rcb, qualified_name)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/jit/_recursive.py", line 44, in _compile_and_register_class
-    script_class = torch._C._jit_script_class_compile(qualified_name, ast, defaults, rcb)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/_jit_internal.py", line 111, in <lambda>
-    return lambda expr: parseExpr(expr, lookup_base)
-KeyboardInterrupt
-
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "./tools/train.py", line 8, in <module>
-    from mmengine.runner import Runner
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/runner/__init__.py", line 2, in <module>
-    from ._flexible_runner import FlexibleRunner
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/runner/_flexible_runner.py", line 14, in <module>
-    from mmengine._strategy import BaseStrategy
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/_strategy/__init__.py", line 4, in <module>
-    from .base import BaseStrategy
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/_strategy/base.py", line 19, in <module>
-    from mmengine.model.wrappers import is_model_wrapper
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/model/__init__.py", line 6, in <module>
-    from .base_model import BaseDataPreprocessor, BaseModel, ImgDataPreprocessor
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/model/base_model/__init__.py", line 2, in <module>
-    from .base_model import BaseModel
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/model/base_model/base_model.py", line 9, in <module>
-    from mmengine.optim import OptimWrapper
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/optim/__init__.py", line 2, in <module>
-    from .optimizer import (OPTIM_WRAPPER_CONSTRUCTORS, OPTIMIZERS,
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/optim/optimizer/__init__.py", line 10, in <module>
-    from .zero_optimizer import ZeroRedundancyOptimizer
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/optim/optimizer/zero_optimizer.py", line 11, in <module>
-    from torch.distributed.optim import \
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/optim/__init__.py", line 13, in <module>
-    from .functional_adamw import _FunctionalAdamW
-  File "<frozen importlib._bootstrap>", line 991, in _find_and_load
-  File "<frozen importlib._bootstrap>", line 975, in _find_and_load_unlocked
-  File "<frozen importlib._bootstrap>", line 671, in _load_unlocked
-KeyboardInterrupt
-Traceback (most recent call last):
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/runpy.py", line 194, in _run_module_as_main
-    return _run_code(code, main_globals, None,
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/runpy.py", line 87, in _run_code
-    exec(code, run_globals)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py", line 193, in <module>
-    main()
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py", line 189, in main
-    launch(args)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launch.py", line 174, in launch
-    run(args)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/run.py", line 752, in run
-    elastic_launch(
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launcher/api.py", line 131, in __call__
-    return launch_agent(self._config, self._entrypoint, list(args))
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/launcher/api.py", line 236, in launch_agent
-    result = agent.run()
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/metrics/api.py", line 125, in wrapper
-    result = f(*args, **kwargs)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/agent/server/api.py", line 709, in run
-    result = self._invoke_run(role)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/agent/server/api.py", line 850, in _invoke_run
-    time.sleep(monitor_interval)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 60, in _terminate_process_handler
-    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
-torch.distributed.elastic.multiprocessing.api.SignalException: Process 2872 got signal: 2
-/home/wuke_2024/anaconda3/bin/python: Error while finding module specification for 'torch.distributed.launch' (ModuleNotFoundError: No module named 'torch')
-09/03 14:05:25 - mmengine - INFO - 
-------------------------------------------------------------
-System environment:
-    sys.platform: linux
-    Python: 3.8.20 (default, Oct  3 2024, 15:24:27) [GCC 11.2.0]
-    CUDA available: True
-    MUSA available: False
-    numpy_random_seed: 833079835
-    GPU 0: NVIDIA GeForce RTX 2080 Ti
-    CUDA_HOME: /home/wuke_2024/anaconda3/envs/ov202503
-    NVCC: Cuda compilation tools, release 11.3, V11.3.122
-    GCC: gcc (Ubuntu 5.5.0-12ubuntu1~16.04) 5.5.0 20171010
-    PyTorch: 1.12.1+cu113
-    PyTorch compiling details: PyTorch built with:
-  - GCC 9.3
-  - C++ Version: 201402
-  - Intel(R) Math Kernel Library Version 2020.0.0 Product Build 20191122 for Intel(R) 64 architecture applications
-  - Intel(R) MKL-DNN v2.6.0 (Git Hash 52b5f107dd9cf10910aaa19cb47f3abf9b349815)
-  - OpenMP 201511 (a.k.a. OpenMP 4.5)
-  - LAPACK is enabled (usually provided by MKL)
-  - NNPACK is enabled
-  - CPU capability usage: AVX2
-  - CUDA Runtime 11.3
-  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86
-  - CuDNN 8.3.2  (built against CUDA 11.5)
-  - Magma 2.5.2
-  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.3, CUDNN_VERSION=8.3.2, CXX_COMPILER=/opt/rh/devtoolset-9/root/usr/bin/c++, CXX_FLAGS= -fabi-version=11 -Wno-deprecated -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -fopenmp -DNDEBUG -DUSE_KINETO -DUSE_FBGEMM -DUSE_QNNPACK -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -DEDGE_PROFILER_USE_KINETO -O2 -fPIC -Wno-narrowing -Wall -Wextra -Werror=return-type -Wno-missing-field-initializers -Wno-type-limits -Wno-array-bounds -Wno-unknown-pragmas -Wno-unused-parameter -Wno-unused-function -Wno-unused-result -Wno-unused-local-typedefs -Wno-strict-overflow -Wno-strict-aliasing -Wno-error=deprecated-declarations -Wno-stringop-overflow -Wno-psabi -Wno-error=pedantic -Wno-error=redundant-decls -Wno-error=old-style-cast -fdiagnostics-color=always -faligned-new -Wno-unused-but-set-variable -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Werror=cast-function-type -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_VERSION=1.12.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=OFF, USE_MPI=OFF, USE_NCCL=ON, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, 
-
-    TorchVision: 0.13.1+cu113
-    OpenCV: 4.11.0
-    MMEngine: 0.10.7
-
-Runtime environment:
-    cudnn_benchmark: False
-    mp_cfg: {'mp_start_method': 'fork', 'opencv_num_threads': 0}
-    dist_cfg: {'backend': 'nccl'}
-    seed: 833079835
-    Distributed launcher: none
-    Distributed training: False
-    GPU number: 1
-------------------------------------------------------------
-
-09/03 14:05:29 - mmengine - INFO - Config:
 auto_scale_lr = dict(base_batch_size=64, enable=False)
 backend_args = None
 class_name = (
@@ -322,9 +196,6 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     visualization=dict(type='GroundingVisualizationHook'))
 default_scope = 'mmdet'
-dino_use_esod_loss = True
-dino_use_seeker_adapter = True
-dino_use_visual_seeker = True
 env_cfg = dict(
     cudnn_benchmark=False,
     dist_cfg=dict(backend='nccl'),
@@ -370,8 +241,7 @@ model = dict(
         drop_path_rate=0.2,
         drop_rate=0.0,
         embed_dims=96,
-        esod_loss=True,
-        finetune_mode='obj_seeker',
+        finetune_mode='hyperadapter',
         frozen_stages=-1,
         init_cfg=dict(
             checkpoint=
@@ -493,9 +363,6 @@ model = dict(
             ],
             type='HungarianAssigner')),
     type='GroundingDINO',
-    use_esod_loss=True,
-    use_seeker_adapter=True,
-    use_visual_seeker=True,
     with_box_refine=True)
 num_classes = 10
 optim_wrapper = dict(
@@ -1024,44 +891,3 @@ visualizer = dict(
         dict(type='LocalVisBackend'),
     ])
 work_dir = 'only_test_bug'
-
-Traceback (most recent call last):
-  File "tools/train.py", line 121, in <module>
-    main()
-  File "tools/train.py", line 110, in main
-    runner = Runner.from_cfg(cfg)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/runner/runner.py", line 462, in from_cfg
-    runner = cls(
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/runner/runner.py", line 429, in __init__
-    self.model = self.build_model(model)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/runner/runner.py", line 836, in build_model
-    model = MODELS.build(model)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/registry/registry.py", line 570, in build
-    return self.build_func(cfg, *args, **kwargs, registry=self)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/registry/build_functions.py", line 232, in build_model_from_cfg
-    return build_from_cfg(cfg, registry, default_args)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/registry/build_functions.py", line 121, in build_from_cfg
-    obj = obj_cls(**args)  # type: ignore
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/detectors/grounding_dino.py", line 549, in __init__
-    super().__init__(*args, **kwargs)
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/detectors/dino.py", line 30, in __init__
-    super().__init__(*args, **kwargs)
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/detectors/deformable_detr.py", line 69, in __init__
-    super().__init__(*args, decoder=decoder, bbox_head=bbox_head, **kwargs)
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/detectors/base_detr.py", line 73, in __init__
-    self.backbone = MODELS.build(backbone)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/registry/registry.py", line 570, in build
-    return self.build_func(cfg, *args, **kwargs, registry=self)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/registry/build_functions.py", line 232, in build_model_from_cfg
-    return build_from_cfg(cfg, registry, default_args)
-  File "/home/wuke_2024/anaconda3/envs/ov202503/lib/python3.8/site-packages/mmengine/registry/build_functions.py", line 121, in build_from_cfg
-    obj = obj_cls(**args)  # type: ignore
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/backbones/swin.py", line 2720, in __init__
-    stage = SwinBlockSequence(
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/backbones/swin.py", line 725, in __init__
-    block = SwinBlock(
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/backbones/swin.py", line 509, in __init__
-    self.obj_seeker_module1 = ObjSeeker(embed_dims)
-  File "/home/wuke_2024/ov202503/mmdetection/mmdet/models/backbones/swin.py", line 1244, in __init__
-    self.dropout = nn.Dropout(dropout_rate)
-NameError: name 'dropout_rate' is not defined
