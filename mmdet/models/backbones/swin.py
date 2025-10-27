@@ -545,11 +545,28 @@ class SwinBlock(BaseModule):
             for name, param in self.named_parameters():
                 if 'omni_seeker_module' not in name:
                     param.requires_grad = self.requires_grad
+
+        elif self.finetune_mode == 'vfmadapter':
+            self.vfmadapter_attn_adapter = VFMAdapter(embed_dims)
+            self.vfmadapter_ffn_adapter = VFMAdapter(embed_dims)
+            self.vfmadapter_query_projector = nn.Linear(embed_dims, 64) #发现得集中到96
+            self.vfmadapter_attn_queries = nn.Parameter(torch.randn(1, 16, 64))
+            self.vfmadapter_ffn_queries = nn.Parameter(torch.randn(1, 16, 64))
+            for name, param in self.named_parameters():
+                if 'vfmadapter' not in name:
+                    param.requires_grad = self.requires_grad
+
         elif self.finetune_mode == 'hyperadapter':
             self.hyperadapter_module1 = HyperAdapter(embed_dims)
             self.hyperadapter_module2 = HyperAdapter(embed_dims)
             for name, param in self.named_parameters():
                 if 'hyperadapter_module' not in name:
+                    param.requires_grad = self.requires_grad
+        elif self.finetune_mode == 'multiscale_hyperadapter':
+            self.multiscale_hyperadapter_module1 = MultiscaleHyperAdapter(embed_dims)
+            self.multiscale_hyperadapter_module2 = MultiscaleHyperAdapter(embed_dims)
+            for name, param in self.named_parameters():
+                if 'multiscale_hyperadapter_module' not in name:
                     param.requires_grad = self.requires_grad
         elif self.finetune_mode == 'hyperadapter_vl':
             # 不开文本损失，只开文本输入
@@ -616,9 +633,19 @@ class SwinBlock(BaseModule):
         def _inner_forward(x,text_features=None,gt_info=None,hyper_generator=None):
             identity = x
             x = self.norm1(x)
+            if self.finetune_mode == 'vfmadapter':
+                tmpx = self.vfmadapter_query_projector(x)
+                q = self.vfmadapter_attn_queries.expand(tmpx.shape[0], -1, -1)
+                sim = torch.matmul(q, tmpx.transpose(1, 2))
+                attn = F.softmax(sim, dim=-1)
+                z_per_query = torch.matmul(attn, tmpx)
+                z = z_per_query.mean(dim=1)
+                tmpx =  self.vfmadapter_attn_adapter(x,z,hyper_generator, hw_shape)
             x = self.attn(x, hw_shape)
-
             x = x + identity
+            if self.finetune_mode == 'vfmadapter':
+                x = x + tmpx
+            
             if self.finetune_mode == 'mona':
                 x = self.mona_module1(x, hw_shape)
             elif self.finetune_mode == 'odmona':
@@ -649,6 +676,8 @@ class SwinBlock(BaseModule):
                 x = self.omni_seeker_module1(x, hw_shape, text_features=text_features)
             elif self.finetune_mode == 'hyperadapter':
                 x = self.hyperadapter_module1(x, hyper_generator, hw_shape)
+            elif self.finetune_mode == 'multiscale_hyperadapter':
+                x = self.multiscale_hyperadapter_module1(x, hyper_generator, hw_shape)
             elif self.finetune_mode == 'hyperadapter_vl':
                 x = self.hyperadapter_vl_module1(x, hyper_generator, hw_shape, text_features=text_features)
             elif self.finetune_mode == 'hyperadapter_esod_seeker':
@@ -666,7 +695,18 @@ class SwinBlock(BaseModule):
             if self.finetune_mode == 'adapter_former':
                 adapt_x = self.adapter_former_module1(x)
             x = self.norm2(x)
+            if self.finetune_mode == 'vfmadapter':
+                tmpx = self.vfmadapter_query_projector(x)
+                q = self.vfmadapter_ffn_queries.expand(tmpx.shape[0], -1, -1)
+                sim = torch.matmul(q, tmpx.transpose(1, 2))
+                attn = F.softmax(sim, dim=-1)
+                z_per_query = torch.matmul(attn, tmpx)
+                z = z_per_query.mean(dim=1)
+                tmpx =  self.vfmadapter_ffn_adapter(x,z,hyper_generator, hw_shape)
             x = self.ffn(x, identity=identity)
+            if self.finetune_mode == 'vfmadapter':
+                x = x + tmpx
+
             if self.finetune_mode == 'mona':
                 x = self.mona_module2(x, hw_shape)
             elif self.finetune_mode == 'odmona':
@@ -695,6 +735,8 @@ class SwinBlock(BaseModule):
                 x = self.omni_seeker_module2(x, hw_shape,text_features=text_features)
             elif self.finetune_mode == 'hyperadapter':
                 x = self.hyperadapter_module2(x, hyper_generator, hw_shape)
+            elif self.finetune_mode == 'multiscale_hyperadapter':
+                x = self.multiscale_hyperadapter_module2(x, hyper_generator, hw_shape)
             elif self.finetune_mode == 'hyperadapter_vl':
                 x = self.hyperadapter_vl_module2(x, hyper_generator, hw_shape, text_features=text_features)
             elif self.finetune_mode == 'hyperadapter_esod_seeker':
@@ -1351,405 +1393,7 @@ class Segmenter(nn.Module):
         return self.m(x)
 
 from torchvision.ops import roi_align
-#TODO:第四处注入，需要形成原型库，使用原型库进行增强
-class VisualSeekerAdapter(nn.Module):
-    """
-    动态寻找稀疏token并进行增强
-    """
-    def __init__(self,
-                 in_dim,
-                 down_project_dim=64,#降维维度
-                 m=16,#m个query
-                 k=64,#topk个token
-                 attention_heads=4,
-                 dropout_rate=0.1,
-                 prototype_update_momentum=0.9,  # 原型更新动量
-                 temperature=0.1,  # 相似度温度参数
-                 roi_size=(3, 3),  # ROI Align的输出尺寸
-                 ):
-        super().__init__()
-        
-        self.m = m
-        self.k = k
-        self.in_dim = in_dim
-        self.projected_dim = down_project_dim
-        self.prototype_update_momentum = prototype_update_momentum
-        self.temperature = temperature
-        self.roi_size = roi_size
 
-        # --- 核心 Adapter 结构 ---
-        # 1. 降维
-        self.down_project = nn.Linear(in_dim, down_project_dim)
-        # 2. 非线性激活与 Dropout (紧跟降维之后)
-        self.nonlinear_activation = F.gelu
-        self.dropout = nn.Dropout(dropout_rate)
-        # 3. 升维
-        self.up_project = nn.Linear(down_project_dim, in_dim)
-        
-        #Query/Prototype 初始化为 nn.Parameter
-        self.m_queries = nn.Parameter(torch.randn(1, m, down_project_dim))
-        self.query_init = False
-        # 原型匹配网络：将GT特征投影到query空间
-        # self.prototype_matcher = nn.Sequential(
-        #     nn.Linear(down_project_dim, down_project_dim),
-        #     nn.ReLU(),
-        #     nn.Linear(down_project_dim, down_project_dim)
-        # )
-        # ROI Align层，用于提取GT区域特征
-        # self.roi_align = roi_align(
-        #     output_size=roi_size,
-        #     spatial_scale=1.0,  # 需要根据实际特征图尺寸调整
-        #     sampling_ratio=-1,
-        #     aligned=True
-        # )
-        
-        # 交互模块: 只有一个自注意力层和 LayerNorm
-        self.interaction_attention = nn.MultiheadAttention(
-            embed_dim=down_project_dim,
-            num_heads=attention_heads,
-            batch_first=True
-        )
-        self.norm = nn.LayerNorm(down_project_dim)
-        
-        # 残差缩放因子
-        self.gamma = nn.Parameter(torch.tensor(1e-1))
-        # 原型库状态跟踪
-        self.prototype_usage_count = nn.Parameter(torch.zeros(m), requires_grad=False)
-
-    def initialize_queries_with_gt(self, all_gt_features, all_gt_labels, noise_std=0.25):
-        """
-        基于GT特征的平均值初始化query，并添加噪声以增加多样性
-        
-        Args:
-            all_gt_features: 所有GT特征 [total_gt, C_proj]
-            all_gt_labels: 所有GT标签 [total_gt]
-            noise_std: 噪声标准差
-        """
-        if len(all_gt_features) == 0:
-            return
-            
-        # 计算所有GT特征的平均值和标准差
-        global_avg_feature = all_gt_features.mean(dim=0)  # [C_proj]
-        global_std_feature = all_gt_features.std(dim=0)  # [C_proj]
-        
-        # 按类别分组计算平均特征
-        unique_labels = torch.unique(all_gt_labels)
-        class_avg_features = {}
-        
-        for label in unique_labels:
-            label_mask = (all_gt_labels == label)
-            label_features = all_gt_features[label_mask]
-            if len(label_features) > 0:
-                class_avg_features[label.item()] = label_features.mean(dim=0)
-        
-        # 初始化query
-        m = self.m_queries.shape[1]  # query数量
-        C_proj = self.m_queries.shape[2]  # 特征维度
-        
-        # 策略1: 使用全局平均特征作为基础
-        base_feature = global_avg_feature
-        
-        # 策略2: 如果有足够的类别，使用类别平均特征
-        if len(class_avg_features) >= m:
-            # 选择前m个类别的平均特征
-            class_features = list(class_avg_features.values())[:m]
-            base_features = torch.stack(class_features)  # [m, C_proj]
-        else:
-            # 使用全局平均特征，并添加不同方向的噪声
-            base_features = base_feature.unsqueeze(0).expand(m, -1)  # [m, C_proj]
-        
-        # 自适应噪声：基于特征的标准差调整噪声强度
-        # 如果特征变化很大，使用更大的噪声；如果特征变化很小，使用较小的噪声
-        adaptive_noise_std = torch.clamp(global_std_feature.mean() * 0.5, min=0.1, max=0.5)
-        actual_noise_std = max(noise_std, adaptive_noise_std.item())
-        
-        # 添加噪声以增加多样性
-        noise = torch.randn_like(base_features) * actual_noise_std
-        initialized_queries = base_features + noise
-        
-        # 更新query参数
-        with torch.no_grad():
-            self.m_queries.data.copy_(initialized_queries.unsqueeze(0))  # [1, m, C_proj]
-        
-        # 标记为已初始化
-        self.query_init = True
-        
-        print(f"Query initialized with {len(unique_labels)} classes, {len(all_gt_features)} GT features, noise_std={actual_noise_std:.3f}")
-
-    def extract_gt_features(self, activated_features, hw_shapes,gt_info):
-        """
-        从激活后的特征中提取GT区域特征
-        
-        Args:
-            activated_features: 激活后的特征 [B, N, C_proj]
-            gt_info: GT信息字典，包含bboxes, labels等
-            hw_shape: 特征图尺寸 (H, W)
-        
-        Returns:
-            gt_features: GT特征列表 [B个元素，每个是[num_gt, C_proj]]
-            gt_labels: GT标签列表 [B个元素，每个是[num_gt]]
-        """
-        B, N, C_proj = activated_features.shape
-        H, W = hw_shapes
-        
-        # 获取GT在特征图上的位置
-        feature_positions = get_feature_positions(gt_info, hw_shapes)
-        
-        gt_features = []
-        gt_labels = []
-        
-        for batch_idx in range(B):
-            batch_features = activated_features[batch_idx]  # [N, C_proj]
-            batch_positions = feature_positions[batch_idx]  # [num_gt, 4]
-            batch_labels = gt_info['labels'][batch_idx]  # [num_gt]
-            
-            if len(batch_positions) == 0:
-                gt_features.append(torch.empty(0, C_proj))
-                gt_labels.append(torch.empty(0, dtype=batch_labels.dtype))
-                continue
-            
-            # 将特征重塑为空间形式 [H, W, C_proj]
-            spatial_features = batch_features.view(H, W, C_proj).permute(2, 0, 1)  # [C_proj, H, W]
-            
-            # 准备ROI Align的输入
-            # 需要将特征图坐标转换为ROI Align期望的格式
-            rois = []
-            valid_gt_indices = []
-            
-            for gt_idx, bbox in enumerate(batch_positions):
-                x1, y1, x2, y2 = bbox.float()
-                
-                # 确保坐标在有效范围内
-                x1 = torch.clamp(x1, 0, W)
-                y1 = torch.clamp(y1, 0, H)
-                x2 = torch.clamp(x2, 0, W)
-                y2 = torch.clamp(y2, 0, H)
-                
-                # 检查bbox是否有效
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                 # ROI Align期望的格式：[batch_idx, x1, y1, x2, y2]
-                roi = torch.tensor([0, x1, y1, x2, y2], dtype=torch.float32, device=spatial_features.device)
-                rois.append(roi)
-                valid_gt_indices.append(gt_idx)
-            if not rois:
-                gt_features.append(torch.empty(0, C_proj))
-                gt_labels.append(torch.empty(0, dtype=batch_labels.dtype))
-                continue
-            
-            # 转换为tensor
-            rois = torch.stack(rois)  # [num_valid_gt, 5]
-            valid_labels = batch_labels[valid_gt_indices]
-            
-            # 使用ROI Align提取特征
-            # 注意：ROI Align期望输入是[B, C, H, W]格式
-            spatial_features = spatial_features.unsqueeze(0)  # [1, C_proj, H, W]
-            
-            try:
-                roi_features = roi_align(
-                    spatial_features,  # [1, C_proj, H, W]
-                    rois,             # [num_valid_gt, 4] - [x1, y1, x2, y2]
-                    output_size=self.roi_size,  # (3, 3)
-                    spatial_scale=1.0,  # 需要根据实际特征图尺寸调整
-                    sampling_ratio=-1,
-                    aligned=True
-                )  # [num_valid_gt, C_proj, roi_h, roi_w]
-                
-                # 全局平均池化得到特征向量
-                roi_features = roi_features.mean(dim=(2, 3))  # [num_valid_gt, C_proj]
-                
-                gt_features.append(roi_features)
-                gt_labels.append(valid_labels)
-                
-            except Exception as e:
-                # 如果ROI Align失败，使用中心点特征作为备选方案
-                print(f"ROI Align failed: {e}, using center point features")
-                center_features = []
-                for bbox in batch_positions[valid_gt_indices]:
-                    x1, y1, x2, y2 = bbox
-                    center_x = (x1 + x2) // 2
-                    center_y = (y1 + y2) // 2
-                    # 使用clamp确保中心点坐标在有效范围内
-                    center_x = torch.clamp(center_x, 0, W)
-                    center_y = torch.clamp(center_y, 0, H)
-                
-                    center_feature = batch_features[center_y * W + center_x]  # [C_proj]
-                    center_features.append(center_feature)
-                
-                if center_features:
-                    center_features = torch.stack(center_features)  # [num_valid_gt, C_proj]
-                    gt_features.append(center_features)
-                    gt_labels.append(valid_labels)
-                else:
-                    gt_features.append(torch.empty(0, C_proj))
-                    gt_labels.append(torch.empty(0, dtype=batch_labels.dtype))
-        
-        return gt_features, gt_labels
-
-    def update_prototypes_with_gt(self, activated_features, hw_shapes, gt_info):
-        """
-        基于GT信息更新query/prototype
-        """
-        if gt_info is None:
-            return
-            
-        gt_features, gt_labels = self.extract_gt_features(activated_features, hw_shapes, gt_info)
-        
-        # 更清晰的empty情况处理
-        if not gt_features:
-            return
-        
-        # 过滤掉empty的特征和标签
-        valid_features = []
-        valid_labels = []
-        
-        for features, labels in zip(gt_features, gt_labels):
-            if len(features) > 0 and len(labels) > 0:
-                valid_features.append(features)
-                valid_labels.append(labels)
-        
-        # 如果没有有效的GT特征，直接返回
-        if not valid_features:
-            return
-            
-        # 拼接所有有效的GT特征
-        all_gt_features = torch.cat(valid_features, dim=0)  # [total_valid_gt, C_proj]
-        all_gt_labels = torch.cat(valid_labels, dim=0)  # [total_valid_gt]
-        
-        # 如果query还没有初始化，先进行初始化
-        if not self.query_init:
-            self.initialize_queries_with_gt(all_gt_features, all_gt_labels)
-            return  # 第一次调用只进行初始化，不进行更新
-        
-        # 按类别分组更新原型
-        unique_labels = torch.unique(all_gt_labels)
-        
-        for label in unique_labels:
-            label_mask = (all_gt_labels == label)
-            label_features = all_gt_features[label_mask]  # [num_gt_class, C_proj]
-            
-            if len(label_features) == 0:
-                continue
-                
-            # 计算该类别的平均特征
-            avg_gt_feature = label_features.mean(dim=0)  # [C_proj]
-            
-            # 计算与现有原型的相似度
-            current_prototypes = self.m_queries.data.squeeze(0)  # [m, C_proj]
-            similarities = F.cosine_similarity(
-                avg_gt_feature.unsqueeze(0), current_prototypes, dim=-1
-            )  # [m]
-            
-            # 找到最相似的原型
-            most_similar_idx = similarities.argmax()
-            similarity_score = similarities[most_similar_idx]
-            
-            # 如果相似度足够高，更新该原型
-            if similarity_score > 0.5:  # 相似度阈值
-                with torch.no_grad():
-                    # 使用动量更新
-                    self.m_queries.data[0, most_similar_idx] = (
-                        self.prototype_update_momentum * self.m_queries.data[0, most_similar_idx] +
-                        (1 - self.prototype_update_momentum) * avg_gt_feature
-                    )
-                    # 更新使用计数
-                    self.prototype_usage_count[most_similar_idx] += 1
-
-    def select_tokens_with_prototypes(self, activated_features):
-        """
-        基于原型特征选择最相关的tokens
-        
-        Args:
-            activated_features: 激活后的特征 [B, N, C_proj]
-        
-        Returns:
-            topk_indices: topk索引 [B, k]
-            sparse_image_tokens: 选中的稀疏tokens [B, k, C_proj]
-        """
-        B, N, C_proj = activated_features.shape
-        
-        # 计算图像特征与原型query的相似度
-        norm_image_features = F.normalize(activated_features, p=2, dim=-1)  # [B, N, C_proj]
-        norm_queries = F.normalize(self.m_queries.expand(B, -1, -1), p=2, dim=-1)  # [B, m, C_proj]
-        
-        # 计算相似度矩阵
-        similarities = torch.bmm(norm_image_features, norm_queries.transpose(1, 2))  # [B, N, m]
-        
-        # 对每个原型，选择最相似的tokens
-        all_scores = []
-        for b in range(B):
-            batch_similarities = similarities[b]  # [N, m]
-            # 取每个原型对应的最大相似度
-            max_similarities, _ = batch_similarities.max(dim=1)  # [N]
-            all_scores.append(max_similarities)
-        
-        all_scores = torch.stack(all_scores)  # [B, N]
-        
-        # 使用STE生成topk mask
-        mask = ste_topk_mask(all_scores, self.k)  # [B, N]
-        
-        # 获取topk的索引
-        topk_indices = mask.nonzero(as_tuple=False).view(B, self.k, 2)[:, :, 1]  # [B, k]
-        topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, self.projected_dim)
-        
-        # 提取稀疏tokens
-        sparse_image_tokens = torch.gather(activated_features, 1, topk_indices_expanded)  # [B, k, C_proj]
-        
-        return topk_indices, sparse_image_tokens, topk_indices_expanded
-
-    def forward(self, image_features, hw_shapes=None, gt_info=None):
-        """
-        Args:
-            image_features: 输入特征 [B, N, C]
-            hw_shapes: 特征图尺寸列表
-            gt_info: GT信息字典，包含gt_features等
-        """
-        B, N, C_in = image_features.shape
-        identity = image_features
-
-        # --- 1. 降维和激活 ---
-        projected_features = self.down_project(image_features)
-        activated_features = self.dropout(self.nonlinear_activation(projected_features))  # [B, N, C_proj]
-
-        # --- 2. 基于GT信息更新原型 ---
-        if gt_info is not None and hw_shapes is not None:
-            self.update_prototypes_with_gt(activated_features, hw_shapes, gt_info)
-
-        # --- 3. 基于原型选择tokens ---
-        topk_indices, sparse_image_tokens, topk_indices_expanded = self.select_tokens_with_prototypes(activated_features)
-
-        # --- 4. 原型与稀疏tokens的交互 ---
-        queries = self.m_queries.expand(B, -1, -1)  # [B, m, C_proj]
-        combined_sequence = torch.cat([queries, sparse_image_tokens], dim=1)  # [B, m+k, C_proj]
-        
-        # 交互: Norm -> Self-Attention -> Add
-        attention_input = self.norm(combined_sequence)
-        attention_output, _ = self.interaction_attention(
-            query=attention_input, key=attention_input, value=attention_input
-        )
-        enhanced_sequence = combined_sequence + attention_output
-        
-        # 分离出增强后的原型和稀疏tokens
-        enhanced_queries = enhanced_sequence[:, :self.m, :]  # [B, m, C_proj]
-        enhanced_sparse_tokens = enhanced_sequence[:, self.m:, :]  # [B, k, C_proj]
-
-        # --- 5. 原型更新（EMA平滑）---
-        with torch.no_grad():
-            # 使用增强后的原型更新query参数
-            self.m_queries.copy_(
-                self.prototype_update_momentum * self.m_queries + 
-                (1 - self.prototype_update_momentum) * enhanced_queries.mean(dim=0, keepdim=True)
-            )
-        
-        # --- 6. 信息还原与升维 ---
-        # 创建零张量并填充增强后的tokens
-        delta_x_projected = torch.zeros_like(activated_features)
-        delta_x_projected.scatter_(1, topk_indices_expanded, enhanced_sparse_tokens)
-        
-        # 升维
-        delta_x = self.up_project(delta_x_projected)  # [B, N, C_in]
-        
-        return identity + delta_x * self.gamma
 
 class DynamicSeekerAdapter(nn.Module):
     """
@@ -2141,13 +1785,14 @@ class HyperConv2d(nn.Module):
         # 重排为 [B, C_out, C_in, k, k]
         weights = weights.permute(0, 4, 1, 2, 3)
         B_w, C_out, C_in_w, K, _ = weights.shape
-        assert B_w == B and C_in_w == C_in, "输入与生成权重的 batch 或通道数不匹配"
+
+        assert B_w == B, "输入与生成权重的 batch 数不匹配"
 
         # 使用 grouped conv 实现 per-sample 卷积
         x_group = x.reshape(1, B * C_in, H, W)
         # Fan-in scaling to prevent large activations
         scale = 1.0 / math.sqrt(C_in * K * K)
-        w_group = (weights * scale).reshape(B * C_out, C_in, K, K)
+        w_group = (weights * scale).reshape(B * C_out, C_in_w, K, K)
         y = F.conv2d(x_group, w_group, stride=self.stride, padding=self.padding, groups=B)
         y = y.reshape(B, C_out, y.shape[-2], y.shape[-1])
         return y
@@ -2207,266 +1852,441 @@ class HyperAdapter(BaseModule):
 
         return identity + project2
 
-class HyperAdapterMona(BaseModule):
+class VFMAdapter(BaseModule):
     def __init__(self,
-                 in_dim,
-                 m=16):
+                 in_dim):
         super().__init__()
 
         self.project1 = nn.Linear(in_dim, 64)
-        self.nonlinear = F.gelu
+        self.nonlinear = F.relu
         self.project2 = nn.Linear(64, in_dim)
-
-        self.dropout = nn.Dropout(p=0.1)
-
         # 不将generator作为模块参数存储，而是通过外部传入
-        self.m_queries = nn.Parameter(torch.randn(1, m, 64))
-        self.norm = nn.LayerNorm(in_dim)
-        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
-        self.gammax = nn.Parameter(torch.ones(in_dim))
-        
+        #self.m_queries = nn.Parameter(torch.randn(1, m, 64))
         # 预创建HyperConv2d，避免每次forward都创建新实例
         self.hyper_conv = None
-        self.static_conv = MonaOp(64)
 
-    def forward(self, x, generator, hw_shapes=None):
-        identity = x
-        x = self.norm(x) * self.gamma + x * self.gammax
-
+    def forward(self, x, z, generator, hw_shapes=None):
+        #输入z是聚合向量，相比于hyperadapter，使用的z输入维度更大
+        #identity = x
         project1 = self.project1(x)
 
         b, n, c = project1.shape
         h, w = hw_shapes
         project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
-        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
-        # project1: [b, c, h, w] -> [b, hw, c]
-        x_flat = project1.reshape(b, c, h * w).permute(0, 2, 1)
-        # m_queries: [1, m, c] -> [b, m, c]
-        q = self.m_queries.expand(b, -1, -1)
-        # 相似度: [b, m, c] x [b, c, hw] -> [b, m, hw]
-        sim = torch.matmul(q, x_flat.transpose(1, 2))
-        attn = F.softmax(sim, dim=-1)
-        # 加权求和: [b, m, hw] x [b, hw, c] -> [b, m, c]
-        z_per_query = torch.matmul(attn, x_flat)
-        # 对 m 维求平均，得到 [b, c]
-        z = z_per_query.mean(dim=1)
-        
-        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
-        if self.hyper_conv is None:
-            self.hyper_conv = HyperConv2d(padding=generator.f_size//2)
-        old_project1 = project1
-        project1 = self.hyper_conv(project1, z, generator)
-        old_project1 = self.static_conv(old_project1)
-        project1 = project1 + old_project1
-        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
-
-        nonlinear = self.nonlinear(project1)
-        nonlinear = self.dropout(nonlinear)
-        project2 = self.project2(nonlinear)
-
-        return identity + project2
-
-#TODO:设计多路的HyperAdapter
-class HyperAdapterMulti(BaseModule):
-    def __init__(self,
-                 in_dim,
-                 m=16):
-        super().__init__()
-
-        self.project1 = nn.Linear(in_dim, 64)
-        self.nonlinear = F.gelu
-        self.project2 = nn.Linear(64, in_dim)
-
-        self.dropout = nn.Dropout(p=0.1)
-
-        # 不将generator作为模块参数存储，而是通过外部传入
-        self.m_queries = nn.Parameter(torch.randn(1, m, 64))
-        self.norm = nn.LayerNorm(in_dim)
-        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
-        self.gammax = nn.Parameter(torch.ones(in_dim))
-        
-        # 预创建HyperConv2d，避免每次forward都创建新实例
-        self.hyper_convs = []
-
-    def forward(self, x, generators, hw_shapes=None):
-        identity = x
-        x = self.norm(x) * self.gamma + x * self.gammax
-
-        project1 = self.project1(x)
-
-        b, n, c = project1.shape
-        h, w = hw_shapes
-        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
-        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
-        # project1: [b, c, h, w] -> [b, hw, c]
-        x_flat = project1.reshape(b, c, h * w).permute(0, 2, 1)
-        # m_queries: [1, m, c] -> [b, m, c]
-        q = self.m_queries.expand(b, -1, -1)
-        # 相似度: [b, m, c] x [b, c, hw] -> [b, m, hw]
-        sim = torch.matmul(q, x_flat.transpose(1, 2))
-        attn = F.softmax(sim, dim=-1)
-        # 加权求和: [b, m, hw] x [b, hw, c] -> [b, m, c]
-        z_per_query = torch.matmul(attn, x_flat)
-        # 对 m 维求平均，得到 [b, c]
-        z = z_per_query.mean(dim=1)
-        
-        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
-        if len(self.hyper_convs) == 0:
-            for generator in generators:
-                self.hyper_convs.append(HyperConv2d(padding=generator.f_size//2))
-
-        # 自动同步设备（避免隐式跨设备拷贝）
-        x_device = x.device
-        for gen in generators:
-            try:
-                gen_device = next(gen.parameters()).device
-                if gen_device != x_device:
-                    gen.to(x_device)
-            except StopIteration:
-                # 如果 generator 没有参数，跳过设备检查
-                pass
-
-        # 流式融合以降低显存峰值和分支复杂度
-        if len(generators) > 0:
-            fused_sum = None
-            for i, generator in enumerate(generators):
-                out_i = self.hyper_convs[i](project1, z, generator)
-                if fused_sum is None:
-                    fused_sum = out_i
-                else:
-                    fused_sum = fused_sum + out_i
-            fused = fused_sum / float(len(generators))
-            project1 = project1 + fused
-        
-        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
-
-        nonlinear = self.nonlinear(project1)
-        nonlinear = self.dropout(nonlinear)
-        project2 = self.project2(nonlinear)
-
-        return identity + project2
-
-#TODO:视觉-文本两路特征卷积
-class HyperAdapterVL(BaseModule):
-    def __init__(self,
-                 in_dim,
-                 ):
-        super().__init__()
-
-        self.project1 = nn.Linear(in_dim, 64)
-        self.nonlinear = F.gelu
-        self.project2 = nn.Linear(64, in_dim)
-
-        self.dropout = nn.Dropout(p=0.1)
-
-        # 不将generator作为模块参数存储，而是通过外部传入
-        
-        self.norm = nn.LayerNorm(in_dim)
-        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
-        self.gammax = nn.Parameter(torch.ones(in_dim))
-        self.gamma_vis = nn.Parameter(torch.tensor(5e-1))
-        
-        # 预创建HyperConv2d，避免每次forward都创建新实例
-        self.hyper_conv_vis = None
-        self.hyper_conv_text = None
-
-    def forward(self, x, generator, hw_shapes=None, text_features=None):
-        identity = x
-        x = self.norm(x) * self.gamma + x * self.gammax
-
-        project1 = self.project1(x)
-
-        b, n, c = project1.shape
-        h, w = hw_shapes
-        z_vis = project1.mean(dim=1)
-        z_text = text_features.mean(dim=1)[:,:64]
-        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
-        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
-        # project1: [b, c, h, w] -> [b, hw, c]
-        
-        # 使用预创建的HyperConv2d，避免每次forward都创建新实例
-        if self.hyper_conv_vis is None:
-            self.hyper_conv_vis = HyperConv2d(padding=generator.f_size//2)
-        if self.hyper_conv_text is None:
-            self.hyper_conv_text = HyperConv2d(padding=generator.f_size//2)
-        
-        project1_vis = self.hyper_conv_vis(project1, z_vis, generator)
-        project1_text = self.hyper_conv_text(project1, z_text, generator)
-        project1 = project1_vis * self.gamma_vis + project1_text * (1 - self.gamma_vis)
-        project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
-
-        nonlinear = self.nonlinear(project1)
-        nonlinear = self.dropout(nonlinear)
-        project2 = self.project2(nonlinear)
-
-        return identity + project2
-        
-
-#TODO:利用esod寻找
-class HyperAdapterESODSeeker(BaseModule):
-    def __init__(self,
-                 in_dim,
-                 ):
-        super().__init__()
-
-        self.project1 = nn.Linear(in_dim, 64)
-        self.nonlinear = F.gelu
-        self.project2 = nn.Linear(64, in_dim)
-
-        self.dropout = nn.Dropout(p=0.1)
-
-        # 不将generator作为模块参数存储，而是通过外部传入
-        
-        self.norm = nn.LayerNorm(in_dim)
-        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
-        self.gammax = nn.Parameter(torch.ones(in_dim))
-        self.dwconv = DWConvForObjSeeker(64, 64, kernel_size=13, stride=1)
-        self.heatmap_conv = Segmenter(nc=1,ch=64)
-        
-        # 预创建HyperConv2d，避免每次forward都创建新实例
-        self.hyper_conv = None
-        
-
-    def forward(self, x, generator, hw_shapes=None, gt_info=None):
-        if gt_info is not None:
-            mask,weight = gen_adapter_mask(gt_info,hw_shapes)
-        identity = x
-        x = self.norm(x) * self.gamma + x * self.gammax
-
-        project1 = self.project1(x)
-
-        b, n, c = project1.shape
-        h, w = hw_shapes
-
-       
-        project1 = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)
-        # 计算 z：基于 m_queries 与 project1 的相似度得到注意力分数，对所有特征加权平均
-        # project1: [b, c, h, w] -> [b, hw, c]
-        pred = self.dwconv(project1)
-        pred = self.heatmap_conv(pred)
-        # pred: [B, 1, H, W]，用 sigmo id（或直接二值）作为权重，不做 softmax
-        weights = (pred > 0.2).float()  # 若需严格二值，可改为 (pred > 0).float()
-        # 归一化加权平均，避免权重和为 0 的数值问题
-        num = (project1 * weights).sum(dim=(2, 3))            # [B, C]
-        den = weights.sum(dim=(2, 3)).clamp_min(1e-6)         # [B, 1]
-        z = num / den                                         # [B, C]
-        
+        # print("*"*100)
+        # print("already in vfm adapter,before hyper conv")
         # 使用预创建的HyperConv2d，避免每次forward都创建新实例
         if self.hyper_conv is None:
             self.hyper_conv = HyperConv2d(padding=generator.f_size//2)
         project1 = self.hyper_conv(project1, z, generator)
         project1 = project1.permute(0, 2, 3, 1).reshape(b, n, c)
-
+        # print("!"*100)
+        # print("already in vfm adapter,after hyper conv")
         nonlinear = self.nonlinear(project1)
-        nonlinear = self.dropout(nonlinear)
         project2 = self.project2(nonlinear)
 
+        return project2
 
-        if gt_info is not None:
-            loss_seg = compute_loss_seg(pred,mask,weight)
-            return identity + project2,loss_seg*0.1
+class MultiscaleDepthwiseSeparableHypernetworksGenerator(nn.Module):
+    """
+    生成多尺度深度可分离卷积核的超网络
+    
+    设计特点：
+    1. 生成3路多尺度卷积核：1x1, 3x3, 5x5 深度可分离卷积
+    2. 每路都是标准的深度可分离卷积：depthwise + pointwise
+    3. 三路结果进行平均融合，而不是拼接
+    4. 相比于标准卷积，参数数量大幅减少
+    
+    公式：
+    - Depthwise separable conv = Depthwise conv + Pointwise conv
+    - 参数数量: K*K*C_in (depthwise) + C_in*C_out (pointwise) << K*K*C_in*C_out
+    """
+    
+    def __init__(self, 
+                 n_z: int,           # 隐变量维度
+                 n_in: int,          # 输入通道数
+                 n_out: int,         # 输出通道数
+                 init_scale: float = 1e-2):
+        super(MultiscaleDepthwiseSeparableHypernetworksGenerator, self).__init__()
+        
+        self.n_z = n_z
+        self.n_in = n_in
+        self.n_out = n_out
+        self.init_scale = init_scale
+        
+        d = n_in * n_z  # 第一层隐层维度
+        self.d = d
+        
+        # 多尺度深度可分离卷积的总参数数量
+        # 1x1: n_in * n_out (pointwise only)
+        # 3x3: 9 * n_in (depthwise) + n_in * n_out (pointwise)
+        # 5x5: 25 * n_in (depthwise) + n_in * n_out (pointwise)
+        output_dim = (n_in * n_out +                    # 1x1 pointwise weights
+                     (9 * n_in + n_in * n_out) +       # 3x3 depthwise + pointwise
+                     (25 * n_in + n_in * n_out))       # 5x5 depthwise + pointwise
+        
+        # 超网络参数（两层MLP）
+        self.w2 = nn.Parameter(torch.empty(n_z, d))
+        self.b2 = nn.Parameter(torch.empty(d))
+        self.w1 = nn.Parameter(torch.empty(d, output_dim))
+        self.b1 = nn.Parameter(torch.empty(output_dim))
+        
+        self._init_parameters()
+    
+    def _init_parameters(self) -> None:
+        """初始化超网络参数"""
+        nn.init.kaiming_normal_(self.w2, mode='fan_in', nonlinearity='linear')
+        nn.init.zeros_(self.b2)
+        nn.init.kaiming_normal_(self.w1, mode='fan_in', nonlinearity='linear')
+        with torch.no_grad():
+            self.w1.mul_(self.init_scale)
+        nn.init.zeros_(self.b1)
+    
+    def forward(self, z: torch.Tensor) -> dict:
+        """
+        生成多尺度深度可分离卷积的核参数
+        
+        Args:
+            z: [B, n_z] 或 [n_z] 的隐变量
+        
+        Returns:
+            dict 包含:
+                'pw_1x1': [B, n_out, n_in, 1, 1] - 1x1 pointwise weights
+                'dw_3x3': [B, n_in, 1, 3, 3] - 3x3 depthwise weights
+                'pw_3x3': [B, n_out, n_in, 1, 1] - 3x3 pointwise weights
+                'dw_5x5': [B, n_in, 1, 5, 5] - 5x5 depthwise weights
+                'pw_5x5': [B, n_out, n_in, 1, 1] - 5x5 pointwise weights
+        """
+        z = z.to(next(self.parameters()).device)
+        
+        # 处理输入维度
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+            squeeze_output = True
         else:
-            return identity + project2
+            squeeze_output = False
+        
+        batch_size = z.shape[0]
+        
+        # 两层MLP生成参数
+        hidden = torch.matmul(z, self.w2) + self.b2  # [B, d]
+        weights_flat = torch.matmul(hidden, self.w1) + self.b1  # [B, output_dim]
+        weights_flat = torch.tanh(weights_flat)  # 稳定性
+        
+        # 解析生成的权重
+        offset = 0
+        
+        # 1x1 pointwise: [B, n_out, n_in, 1, 1]
+        pw_1x1_size = self.n_in * self.n_out
+        pw_1x1 = weights_flat[:, offset:offset+pw_1x1_size]
+        pw_1x1 = pw_1x1.reshape(batch_size, self.n_out, self.n_in, 1, 1)
+        offset += pw_1x1_size
+        
+        # 3x3 depthwise: [B, n_in, 1, 3, 3]
+        dw_3x3_size = 9 * self.n_in
+        dw_3x3 = weights_flat[:, offset:offset+dw_3x3_size]
+        dw_3x3 = dw_3x3.reshape(batch_size, self.n_in, 1, 3, 3)
+        offset += dw_3x3_size
+        
+        # 3x3 pointwise: [B, n_out, n_in, 1, 1]
+        pw_3x3_size = self.n_in * self.n_out
+        pw_3x3 = weights_flat[:, offset:offset+pw_3x3_size]
+        pw_3x3 = pw_3x3.reshape(batch_size, self.n_out, self.n_in, 1, 1)
+        offset += pw_3x3_size
+        
+        # 5x5 depthwise: [B, n_in, 1, 5, 5]
+        dw_5x5_size = 25 * self.n_in
+        dw_5x5 = weights_flat[:, offset:offset+dw_5x5_size]
+        dw_5x5 = dw_5x5.reshape(batch_size, self.n_in, 1, 5, 5)
+        offset += dw_5x5_size
+        
+        # 5x5 pointwise: [B, n_out, n_in, 1, 1]
+        pw_5x5_size = self.n_in * self.n_out
+        pw_5x5 = weights_flat[:, offset:offset+pw_5x5_size]
+        pw_5x5 = pw_5x5.reshape(batch_size, self.n_out, self.n_in, 1, 1)
+        
+        result = {
+            'pw_1x1': pw_1x1,  # [B, n_out, n_in, 1, 1]
+            'dw_3x3': dw_3x3,  # [B, n_in, 1, 3, 3]
+            'pw_3x3': pw_3x3,  # [B, n_out, n_in, 1, 1]
+            'dw_5x5': dw_5x5,  # [B, n_in, 1, 5, 5]
+            'pw_5x5': pw_5x5,  # [B, n_out, n_in, 1, 1]
+        }
+        
+        if squeeze_output:
+            result = {k: v.squeeze(0) for k, v in result.items()}
+        
+        return result
+
+
+class MultiscaleDepthwiseSeparableHyperConv2d(nn.Module):
+    """
+    使用 MultiscaleDepthwiseSeparableHypernetworksGenerator 生成的多尺度卷积层
+    
+    实现3路多尺度深度可分离卷积：
+    - 路径1: 1x1 pointwise卷积
+    - 路径2: 3x3 depthwise + 1x1 pointwise
+    - 路径3: 5x5 depthwise + 1x1 pointwise
+    
+    三路结果进行平均融合
+    """
+    
+    def __init__(self, stride: int = 1, padding: int = 1):
+        super(MultiscaleDepthwiseSeparableHyperConv2d, self).__init__()
+        # 确保stride是整数
+        if isinstance(stride, (list, tuple)):
+            self.stride = stride[0] if len(stride) > 0 else 1
+        else:
+            self.stride = stride
+        self.padding = padding
+    
+    def forward(self, x: torch.Tensor, 
+                z: torch.Tensor, 
+                generator: "MultiscaleDepthwiseSeparableHypernetworksGenerator") -> torch.Tensor:
+        """
+        Args:
+            x: [B, C_in, H, W] 输入特征
+            z: [B, n_z] 或 [n_z] 隐变量
+            generator: MultiscaleDepthwiseSeparableHypernetworksGenerator 实例
+        
+        Returns:
+            y: [B, C_out, H, W] 输出特征（三路平均融合）
+        """
+        # 生成所有路径的权重
+        weights = generator(z)  # dict of tensors
+        
+        B, C_in, H, W = x.shape
+        C_out = weights['pw_1x1'].shape[1]  # 从权重形状获取输出通道数
+        
+        # 确保权重与输入在同一设备上
+        device = x.device
+        for key in weights:
+            if weights[key].device != device:
+                weights[key] = weights[key].to(device)
+        
+        outputs = []
+        
+        # 路径1: 1x1 pointwise卷积
+        pw_1x1 = weights['pw_1x1']  # [B, C_out, C_in, 1, 1]
+        scale = 1.0 / math.sqrt(C_in)
+        pw_1x1_scaled = (pw_1x1 * scale).squeeze(0)  # [C_out, C_in, 1, 1]
+        y1 = F.conv2d(x, pw_1x1_scaled, stride=self.stride, padding=0)
+        outputs.append(y1)
+        
+        # 路径2: 3x3 depthwise + pointwise
+        dw_3x3 = weights['dw_3x3']  # [B, C_in, 1, 3, 3]
+        pw_3x3 = weights['pw_3x3']  # [B, C_out, C_in, 1, 1]
+        
+        # Depthwise 3x3
+        scale = 1.0 / math.sqrt(9)
+        dw_3x3_scaled = (dw_3x3 * scale).squeeze(0)  # [C_in, 1, 3, 3]
+        y_dw = F.conv2d(x, dw_3x3_scaled, stride=self.stride, 
+                       padding=self.padding, groups=C_in)
+        
+        # Pointwise 1x1
+        scale = 1.0 / math.sqrt(C_in)
+        pw_3x3_scaled = (pw_3x3 * scale).squeeze(0)  # [C_out, C_in, 1, 1]
+        y2 = F.conv2d(y_dw, pw_3x3_scaled)
+        outputs.append(y2)
+        
+        # 路径3: 5x5 depthwise + pointwise
+        dw_5x5 = weights['dw_5x5']  # [B, C_in, 1, 5, 5]
+        pw_5x5 = weights['pw_5x5']  # [B, C_out, C_in, 1, 1]
+        
+        # Depthwise 5x5
+        scale = 1.0 / math.sqrt(25)
+        dw_5x5_scaled = (dw_5x5 * scale).squeeze(0)  # [C_in, 1, 5, 5]
+        y_dw = F.conv2d(x, dw_5x5_scaled, stride=self.stride, 
+                       padding=2, groups=C_in)
+        
+        # Pointwise 1x1
+        scale = 1.0 / math.sqrt(C_in)
+        pw_5x5_scaled = (pw_5x5 * scale).squeeze(0)  # [C_out, C_in, 1, 1]
+        y3 = F.conv2d(y_dw, pw_5x5_scaled)
+        outputs.append(y3)
+        
+        # 三路结果平均融合
+        output = torch.stack(outputs, dim=0).mean(dim=0)  # [B, C_out, H, W]
+        return output
+
+
+class MultiscaleHyperAdapter(BaseModule):
+    """
+    基于多尺度深度可分离卷积超网络的适配器模块
+    
+    结合了多尺度设计和HyperNetwork的动态生成能力
+    """
+    
+    def __init__(self,
+                 in_dim: int,
+                 m: int = 16,
+                 intermediate_dim: int = 64):
+        """
+        Args:
+            in_dim: 输入维度
+            m: 多路查询的数量
+            intermediate_dim: 中间投影维度
+        """
+        super().__init__()
+        
+        self.in_dim = in_dim
+        self.intermediate_dim = intermediate_dim
+        
+        # 投影层
+        self.project1 = nn.Linear(in_dim, intermediate_dim)
+        self.nonlinear = F.gelu
+        self.dropout = nn.Dropout(p=0.1)
+        
+        # 输出投影（从多尺度融合回原维度）
+        self.project2 = nn.Linear(intermediate_dim, in_dim)
+        
+        # 层归一化和缩放
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+        
+        # 多路查询用于生成隐变量z
+        self.m_queries = nn.Parameter(torch.randn(1, m, intermediate_dim))
+        
+        # 预创建卷积层
+        #self.hyper_conv = MultiscaleDepthwiseSeparableHyperConv2d(stride=1, padding=1)
+        self.hyper_conv = None
+    
+    def forward(self, x: torch.Tensor, 
+                generator: "MultiscaleDepthwiseSeparableHypernetworksGenerator",
+                hw_shapes: tuple) -> torch.Tensor:
+        """
+        Args:
+            x: [B, N, C] 输入特征 (N=H*W)
+            generator: MultiscaleDepthwiseSeparableHypernetworksGenerator 实例
+            hw_shapes: (H, W) 特征图大小
+        
+        Returns:
+            y: [B, N, C] 输出特征
+        """
+        identity = x
+        x = self.norm(x) * self.gamma + x * self.gammax
+        
+        # 第一层投影
+        project1 = self.project1(x)  # [B, N, intermediate_dim]
+        
+        b, n, c = project1.shape
+        h, w = hw_shapes
+        
+        # 重塑为空间形式
+        project1_spatial = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)  # [B, C, H, W]
+        
+        # 计算z：基于多路查询与特征的相似度
+        x_flat = project1_spatial.reshape(b, c, h * w).permute(0, 2, 1)  # [B, HW, C]
+        q = self.m_queries.expand(b, -1, -1)  # [B, m, C]
+        
+        # 计算注意力分数
+        sim = torch.matmul(q, x_flat.transpose(1, 2))  # [B, m, HW]
+        attn = F.softmax(sim, dim=-1)
+        
+        # 加权求和得到每个查询的加权特征
+        z_per_query = torch.matmul(attn, x_flat)  # [B, m, C]
+        
+        # 对所有查询取平均得到最终的z
+        z = z_per_query.mean(dim=1)  # [B, C]
+        
+        # 应用多尺度深度可分离卷积
+        if self.hyper_conv is None:
+            self.hyper_conv = MultiscaleDepthwiseSeparableHyperConv2d(stride=1, padding=1)
+        project1_out = self.hyper_conv(project1_spatial, z, generator)  # [B, C, H, W]
+        
+        # 重塑回序列形式
+        project1_out = project1_out.permute(0, 2, 3, 1).reshape(b, n, c)
+        
+        # 非线性激活和dropout
+        nonlinear = self.nonlinear(project1_out)
+        nonlinear = self.dropout(nonlinear)
+        
+        # 投影回原维度
+        project2 = self.project2(nonlinear)  # [B, N, in_dim]
+        
+        return identity + project2
+
+class MultiscaleHyperAdapterWithNoQueries(BaseModule):
+    """
+    基于多尺度深度可分离卷积超网络的适配器模块,消除了query以进行消融实验,在multiscale_adapter的基础上进行修改
+    
+    结合了多尺度设计和HyperNetwork的动态生成能力
+    """
+    
+    def __init__(self,
+                 in_dim: int,
+                 intermediate_dim: int = 64):
+        """
+        Args:
+            in_dim: 输入维度
+            intermediate_dim: 中间投影维度
+        """
+        super().__init__()
+        
+        self.in_dim = in_dim
+        self.intermediate_dim = intermediate_dim
+        
+        # 投影层
+        self.project1 = nn.Linear(in_dim, intermediate_dim)
+        self.nonlinear = F.gelu
+        self.dropout = nn.Dropout(p=0.1)
+        
+        # 输出投影（从多尺度融合回原维度）
+        self.project2 = nn.Linear(intermediate_dim, in_dim)
+        
+        # 层归一化和缩放
+        self.norm = nn.LayerNorm(in_dim)
+        self.gamma = nn.Parameter(torch.ones(in_dim) * 1e-6)
+        self.gammax = nn.Parameter(torch.ones(in_dim))
+            
+        # 预创建卷积层
+        #self.hyper_conv = MultiscaleDepthwiseSeparableHyperConv2d(stride=1, padding=1)
+        self.hyper_conv = None
+    
+    def forward(self, x: torch.Tensor, 
+                generator: "MultiscaleDepthwiseSeparableHypernetworksGenerator",
+                hw_shapes: tuple) -> torch.Tensor:
+        """
+        Args:
+            x: [B, N, C] 输入特征 (N=H*W)
+            generator: MultiscaleDepthwiseSeparableHypernetworksGenerator 实例
+            hw_shapes: (H, W) 特征图大小
+        
+        Returns:
+            y: [B, N, C] 输出特征
+        """
+        identity = x
+        x = self.norm(x) * self.gamma + x * self.gammax
+        
+        # 第一层投影
+        project1 = self.project1(x)  # [B, N, intermediate_dim]
+        
+        b, n, c = project1.shape
+        h, w = hw_shapes
+        
+        # 重塑为空间形式
+        project1_spatial = project1.reshape(b, h, w, c).permute(0, 3, 1, 2)  # [B, C, H, W]
+        
+        z = project1.mean(dim=1)  # [B, C]
+        
+        # 应用多尺度深度可分离卷积
+        if self.hyper_conv is None:
+            self.hyper_conv = MultiscaleDepthwiseSeparableHyperConv2d(stride=1, padding=1)
+        project1_out = self.hyper_conv(project1_spatial, z, generator)  # [B, C, H, W]
+        
+        # 重塑回序列形式
+        project1_out = project1_out.permute(0, 2, 3, 1).reshape(b, n, c)
+        
+        # 非线性激活和dropout
+        nonlinear = self.nonlinear(project1_out)
+        nonlinear = self.dropout(nonlinear)
+        
+        # 投影回原维度
+        project2 = self.project2(nonlinear)  # [B, N, in_dim]
+        
+        return identity + project2
+
 
 @MODELS.register_module()
 class SwinTransformer(BaseModule):
@@ -2667,12 +2487,19 @@ class SwinTransformer(BaseModule):
         self.esod_loss = esod_loss
         self.adapter_stages = adapter_stages
 
-        if finetune_mode is not None and 'hyperadapter' in finetune_mode and 'hyperadapter_multi' not in finetune_mode:
+        if finetune_mode is not None and 'hyperadapter' in finetune_mode and 'hyperadapter_multi' not in finetune_mode and 'multiscale_hyperadapter' not in finetune_mode:
             self.hyper_generator = HyperNetworksGenerator(n_z=64, n_in=64, n_out=64, f_size=3)
         elif finetune_mode is not None and 'hyperadapter_multi' in finetune_mode:
             self.hyper_generator = []
             for i in [1,3,3]:
                 self.hyper_generator.append(HyperNetworksGenerator(n_z=64, n_in=64, n_out=64, f_size=i))
+        elif finetune_mode is not None and 'multiscale_hyperadapter' in finetune_mode:
+            self.hyper_generator = MultiscaleDepthwiseSeparableHypernetworksGenerator(n_z=64, n_in=64, n_out=64)
+        elif finetune_mode is not None and 'vfmadapter' in finetune_mode:
+            self.hyper_generator = HyperNetworksGenerator(n_z=64, n_in=64, n_out=64, f_size=3)
+            # self.hyper_generator = []
+            # for i in range(2): # vfm attn和ffn各有其生成器
+            #     self.hyper_generator.append(HyperNetworksGenerator(n_z=96, n_in=64, n_out=64, f_size=3))
         else:
             self.hyper_generator = None
         self.stages = ModuleList()
@@ -2800,6 +2627,10 @@ class SwinTransformer(BaseModule):
             elif 'hyperadapter' in finetune_mode:
                 for name, param in self.named_parameters():
                     if 'hyperadapter' not in name and 'hyper_generator' not in name:
+                        param.requires_grad = requires_grad
+            elif finetune_mode == 'vfmadapter':
+                for name, param in self.named_parameters():
+                    if 'vfmadapter' not in name and 'hyper_generator' not in name:
                         param.requires_grad = requires_grad
         if self.is_vpt:
             for name, param in self.named_parameters():
@@ -3049,4 +2880,5 @@ def swin_converter(ckpt):
         new_ckpt['backbone.' + new_k] = new_v
 
     return new_ckpt
+
 
